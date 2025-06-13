@@ -34,30 +34,42 @@ class argo:
                 T=dataset[T_name][i,0:len_chunk].data
                 S=dataset[S_name][i,0:len_chunk].data
 
-            # link chuncked profiles together
+            ### link chuncked profiles together
             while (links_all[i]):
-                if links_all[i+1]:
-                    depth=np.concatenate([depth,dataset[depth_name][i+1,0:len_chunk].data])
-                    if not meta_only:
-                        T=np.concatenate([T,dataset[T_name][i+1,0:len_chunk].data])
-                        S=np.concatenate([S,dataset[S_name][i+1,0:len_chunk].data])
-                else:
-                    depth=np.concatenate(
-                        [depth,dataset[depth_name][i+1,0:len_chunk].dropna(dim=depth_index).data])
-                    if not meta_only:
-                        T=np.concatenate(
-                            [T,dataset[T_name][i+1,0:len_chunk].dropna(dim=depth_index).data])
-                        S=np.concatenate(
-                            [S,dataset[S_name][i+1,0:len_chunk].dropna(dim=depth_index).data])
+                # if links_all[i+1]:
+                depth=np.concatenate([depth,dataset[depth_name][i+1,0:len_chunk].data])
+                if not meta_only:
+                    T=np.concatenate([T,dataset[T_name][i+1,0:len_chunk].data])
+                    S=np.concatenate([S,dataset[S_name][i+1,0:len_chunk].data])
+                # else:
+                #     depth=np.concatenate(
+                #         [depth,dataset[depth_name][i+1,0:len_chunk].dropna(dim=depth_index).data])
+                #     if not meta_only:
+                #         T=np.concatenate(
+                #             [T,dataset[T_name][i+1,0:len_chunk].dropna(dim=depth_index).data])
+                #         S=np.concatenate(
+                #             [S,dataset[S_name][i+1,0:len_chunk].dropna(dim=depth_index).data])
                 i += 1
 
-            # Need to subsample(thinning) the profiles with too many levels
-            if depth[0]<100:
+            if (len(depth)!=len(T) or len(depth)!=len(S)):
+                raise Exception('Argo profile levels do not match')
+
+            ### Remove depths outside of the 0-6500m range (missing/fill data problem)
+            depth_mask=depth[(depth>0) & (depth<6500)]
+            T_mask=T[(depth>0) & (depth<6500)]
+            S_mask=S[(depth>0) & (depth<6500)]
+
+            ### Remove DeepArgo profiles and profiles that didn't reach close to surface
+            if depth[0]<30 or depth[-1]<2000:
+
+                ### Need to subsample(thinning) the profiles with too many levels
                 # if len(depth) > 100 or (depth[-1]-depth[0])/len(depth):
                 #     depth_new,T_new,S_new = argo_vertical_coarsen(depth,T,S,model_dz)
-                self.profiles.append(argo_float(time,lat,lon,depth,T,S,meta_only))
+
+                self.profiles.append(argo_float(time,lat,lon,depth_mask,T_mask,S_mask,meta_only))
             i += 1
 
+        ### Get some summary statistics for easy diagnostics
         self.min_depth = np.array([profile.min_depth for profile in self.profiles])
         self.max_depth = np.array([profile.max_depth for profile in self.profiles])
         self.levels = np.array([profile.levels for profile in self.profiles])
@@ -98,6 +110,8 @@ class argo_float:
     """Class to hold a single Argo float profile."""
     def __init__(self,time,lat,lon,depth,T,S,meta_only=False):
         """Initialize an Argo float profile."""
+        if (len(depth)!=len(T) or len(depth)!=len(S)):
+            raise Exception('Argo profile levels do not match')
         self.time = time
         self.lat = lat
         self.lon = lon
@@ -112,8 +126,8 @@ class argo_float:
     def get_levels(self):
         return len(self.depth)
 
-# combine_levels = [0,6,12,18,23,27,30,33,36,39,42,45,48,51,54,57,60,63,66,69,72,75]
 def model_vertical_coarsen(T,dz,combine_levels,z_name='z'):
+    ### combine_levels = [0,6,12,18,23,27,30,33,36,39,42,45,48,51,54,57,60,63,66,69,72,75]
     if len(T[z_name]) != len(dz):
         raise Exception('vertical levels not matched')
         
