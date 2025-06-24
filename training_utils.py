@@ -1,0 +1,178 @@
+# --- train_and_sample.py ---
+# This is the main script for training the model and performing conditional sampling.
+import torch
+import torch.optim as optim
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import numpy as np
+import os # Import the os module for path operations
+import imageio # For creating GIF animations
+from torch.utils.data import DataLoader, random_split # Import random_split
+
+# Import components from other files
+from unet_model import UNet, count_parameters # count_parameters imported for model size
+from diffusion_process import Diffusion # Already imported
+
+# --- Training Function ---
+def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer, epochs, device, land_mask, start_epoch=0):
+    """
+    Trains the diffusion U-Net model and evaluates on a validation set.
+
+    Args:
+        model (nn.Module): The U-Net model to train.
+        train_loader (torch.utils.data.DataLoader): DataLoader for training data.
+        val_loader (torch.utils.data.DataLoader): DataLoader for validation data.
+        diffusion (Diffusion): Diffusion process utility object.
+        optimizer (torch.optim.Optimizer): Optimizer for model parameters.
+        epochs (int): Number of training epochs.
+        device (torch.device): Device to perform computations on (CPU/CUDA).
+        land_mask (torch.Tensor): Global land/ocean mask (1, 1, H, W).
+        start_epoch (int): The epoch to start training from (useful for resuming).
+    
+    Returns:
+        tuple: (list, list) - lists of training losses and validation losses per epoch.
+    """
+    model.train() # Set model to training mode
+    print("Starting training...")
+    
+    train_losses = []
+    val_losses = []
+
+    # Flag to control verbose printing in UNet.forward for the first iteration
+    print_unet_forward_shapes_train = True 
+
+    for epoch in range(start_epoch, epochs): # Start from `start_epoch`
+        total_train_loss = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} (Training)")
+        for batch_idx, batch in enumerate(pbar):
+            optimizer.zero_grad()
+            x_0 = batch.to(device)
+            current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1).to(device)
+            t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=device).long()
+            x_t, true_epsilon = diffusion.noise_images(x_0, t, current_land_mask)
+            predicted_epsilon = model(x_t, t, current_land_mask, verbose_forward=print_unet_forward_shapes_train) 
+
+            if print_unet_forward_shapes_train:
+                print_unet_forward_shapes_train = False
+
+            loss = F.mse_loss(predicted_epsilon * current_land_mask.float(),
+                              true_epsilon * current_land_mask.float())
+            total_train_loss += loss.item()
+
+            loss.backward()
+            optimizer.step()
+            pbar.set_postfix(loss=loss.item())
+
+        avg_train_loss = total_train_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+        print(f"Epoch {epoch+1} finished, Average Training Loss: {avg_train_loss:.4f}")
+
+        # --- Validation Loop ---
+        model.eval() # Set model to evaluation mode
+        total_val_loss = 0
+        with torch.no_grad(): # No gradients needed for validation
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} (Validation)")
+            for batch_idx, batch in enumerate(val_pbar):
+                x_0_val = batch.to(device)
+                current_land_mask_val = land_mask.repeat(x_0_val.shape[0], 1, 1, 1).to(device)
+                t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=device).long()
+                x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, current_land_mask_val)
+                predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, verbose_forward=False) # No verbose for val
+
+                val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val.float(),
+                                      true_epsilon_val * current_land_mask_val.float())
+                total_val_loss += val_loss.item()
+                val_pbar.set_postfix(val_loss=val_loss.item())
+
+        avg_val_loss = total_val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+        print(f"Epoch {epoch+1} finished, Average Validation Loss: {avg_val_loss:.4f}")
+        model.train() # Set model back to training mode for next epoch
+
+    return train_losses, val_losses
+
+# --- Animation Function for Training Data ---
+def create_training_animation(data_tensor, land_mask, channels, use_salinity, save_path, interval=200):
+    """
+    Creates an animation (GIF) of the generated synthetic training data samples.
+
+    Args:
+        data_tensor (torch.Tensor): The tensor of training data samples (N, C, H, W).
+        land_mask (torch.Tensor): The global land/ocean mask (1, 1, H, W).
+        channels (int): Number of channels (1 for Temp, 2 for Temp+Salinity).
+        use_salinity (bool): If True, also plots salinity data.
+        save_path (str): File path to save the GIF animation.
+        interval (int): Delay between frames in milliseconds.
+    """
+    print(f"Creating training data animation and saving to {save_path}...")
+    frames = []
+    land_mask_np = land_mask[0, 0].cpu().numpy()
+    
+    num_cols = channels if use_salinity else 1
+    
+    # Limit number of frames to avoid excessively large GIFs
+    max_frames = 1000 
+    data_to_animate = data_tensor[:min(len(data_tensor), max_frames):10]
+
+    for i, sample in enumerate(tqdm(data_to_animate, desc="Generating animation frames")):
+        sample_np = sample.cpu().numpy()
+        
+        fig, axes = plt.subplots(1, num_cols, figsize=(7.5 * num_cols, 7))
+        if num_cols == 1: # If only one subplot, axes is not an array
+            axes = [axes]
+
+        # Plot Temperature Map (always channel 0)
+        masked_temp = np.ma.masked_where(land_mask_np == 0, sample_np[0])
+        im_temp = axes[0].imshow(masked_temp, cmap='viridis', origin='lower', vmin=0., vmax=1.)
+        axes[0].set_title(f'Sample {i+1} - Temperature (Ocean Only)')
+        axes[0].set_xlabel('X-coordinate')
+        axes[0].set_ylabel('Y-coordinate')
+        plt.colorbar(im_temp, ax=axes[0], label='Normalized Temperature')
+
+        # Plot Salinity Map (only if use_salinity is True)
+        if use_salinity:
+            masked_sal = np.ma.masked_where(land_mask_np == 0, sample_np[1])
+            im_sal = axes[1].imshow(masked_sal, cmap='plasma', origin='lower', vmin=0., vmax=1.)
+            axes[1].set_title(f'Sample {i+1} - Salinity (Ocean Only)')
+            axes[1].set_xlabel('X-coordinate')
+            axes[1].set_ylabel('Y-coordinate')
+            plt.colorbar(im_sal, ax=axes[1], label='Normalized Salinity')
+
+        plt.tight_layout()
+        
+        # Capture the plot as an image and append to frames
+        fig.canvas.draw()
+        image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+        image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        frames.append(image)
+        plt.close(fig) # Close the figure to free up memory
+
+    if frames:
+        imageio.mimsave(save_path, frames, fps=10) # fps controls speed
+        print(f"Animation saved successfully to {save_path}")
+    else:
+        print("No frames were generated for the animation.")
+
+# --- Loss Plotting Function ---
+def plot_losses(train_losses, val_losses, save_path):
+    """
+    Plots the training and validation losses over epochs.
+
+    Args:
+        train_losses (list): List of training loss values per epoch.
+        val_losses (list): List of validation loss values per epoch.
+        save_path (str): File path to save the loss plot.
+    """
+    epochs_range = range(1, len(train_losses) + 1)
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs_range, train_losses, label='Training Loss')
+    plt.plot(epochs_range, val_losses, label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(save_path)
+    plt.show()
+    print(f"Loss plot saved to {save_path}")
