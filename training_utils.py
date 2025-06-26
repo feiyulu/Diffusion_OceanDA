@@ -15,7 +15,18 @@ from unet_model import UNet, count_parameters # count_parameters imported for mo
 from diffusion_process import Diffusion # Already imported
 
 # --- Training Function ---
-def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer, epochs, device, land_mask, start_epoch=0):
+def train_diffusion_model(
+    model, 
+    train_loader, 
+    val_loader, 
+    diffusion, 
+    optimizer, 
+    epochs, 
+    device, 
+    land_mask, 
+    start_epoch=0,
+    use_dayofyear_embedding=False,
+    use_2d_location_embedding=False):
     """
     Trains the diffusion U-Net model and evaluates on a validation set.
 
@@ -45,13 +56,23 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
     for epoch in range(start_epoch, epochs): # Start from `start_epoch`
         total_train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} (Training)")
-        for batch_idx, batch in enumerate(pbar):
+        for batch_idx, (x_0, dayofyear_batch, location_field_batch) in enumerate(pbar): # MODIFIED
             optimizer.zero_grad()
-            x_0 = batch.to(device)
+            x_0 = x_0.to(device)
             current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1).to(device)
+            
             t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=device).long()
             x_t, true_epsilon = diffusion.noise_images(x_0, t, current_land_mask)
-            predicted_epsilon = model(x_t, t, current_land_mask, verbose_forward=print_unet_forward_shapes_train) 
+            
+            # Prepare optional embeddings for model input
+            doy_input = dayofyear_batch.to(device) if use_dayofyear_embedding else None
+            # NEW: Pass 2D location field if enabled
+            loc_field_input = location_field_batch.to(device) if use_2d_location_embedding else None # NEW
+
+            predicted_epsilon = model(x_t, t, current_land_mask, 
+                                      dayofyear_batch=doy_input, 
+                                      location_field=loc_field_input, # MODIFIED: Pass location_field
+                                      verbose_forward=print_unet_forward_shapes_train) 
 
             if print_unet_forward_shapes_train:
                 print_unet_forward_shapes_train = False
@@ -73,12 +94,22 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
         total_val_loss = 0
         with torch.no_grad(): # No gradients needed for validation
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} (Validation)")
-            for batch_idx, batch in enumerate(val_pbar):
-                x_0_val = batch.to(device)
+            for batch_idx, (x_0_val, dayofyear_batch_val, location_field_batch_val) in enumerate(val_pbar): # MODIFIED
+                x_0_val = x_0_val.to(device)
                 current_land_mask_val = land_mask.repeat(x_0_val.shape[0], 1, 1, 1).to(device)
+                
                 t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=device).long()
                 x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, current_land_mask_val)
-                predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, verbose_forward=False) # No verbose for val
+                
+                # Prepare optional embeddings for model input in validation
+                doy_input_val = dayofyear_batch_val.to(device) if use_dayofyear_embedding else None
+                # NEW: Pass 2D location field if enabled
+                loc_field_input_val = location_field_batch_val.to(device) if use_2d_location_embedding else None # NEW
+
+                predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, 
+                                              dayofyear_batch=doy_input_val, 
+                                              location_field=loc_field_input_val, # MODIFIED
+                                              verbose_forward=False) # No verbose for val
 
                 val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val.float(),
                                       true_epsilon_val * current_land_mask_val.float())

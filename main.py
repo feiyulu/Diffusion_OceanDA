@@ -41,57 +41,25 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Initialize the config object by loading from a JSON file
-    # This makes it easy to change settings without modifying code.
     try:
         config = Config.from_json_file(f"{args.work_path}/{args.config}")
         if os.path.realpath(config.output_dir) != os.path.realpath(args.work_path):
             raise Exception('Working directory does not match case name.')
     except FileNotFoundError as e:
         print(e)
-        print("Please ensure 'config.json' exists in the same directory as 'main.py'.")
-        print("Falling back to default configuration.")
-        config = Config(
-            test_id='test2',
-            image_size=(128, 128),
-            real_data=True,
-            filepath_t=[f'/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.{year}.1x1.nc' for year in range(2003,2024)],
-            filepath_s=[f'/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.{year}.1x1.nc' for year in range(2003,2024)],
-            filepath_t_test='/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2024.1x1.nc',
-            filepath_s_test='/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2024.1x1.nc',
-            varname_t='sst',
-            varname_s='sss',
-            lat_range=[26,154],
-            lon_range=[120,248],
-            training_day_range=[0,10000,1],
-            sample_day=270,
-            use_salinity=False,
-            timesteps=1000,
-            beta_start=1e-5,
-            beta_end=0.01,
-            unet_width=64,
-            epochs=100,
-            batch_size=200,
-            learning_rate=1e-5,
-            data_points=500,
-            validation_split=0.1,
-            channel_wise_normalization=True,
-            sampling_method='ddpm',
-            observation_fidelity_weight=1.0,
-            observation_samples=1000,
-            save_model_after_training=True,
-            load_model_for_sampling=False
-        )
+        raise Exception("Please ensure 'config.json' exists")
 
     print(f"Using device: {config.device}")
     print(f"Model will use {config.channels} channel(s). Salinity included: {config.use_salinity}")
     print(f"Sampling method: {config.sampling_method.upper()}")
     print(f"Observation fidelity weight: {config.observation_fidelity_weight}")
     print(f"Generate training animation: {config.generate_training_animation}")
+    print(f"Using day of year embedding: {config.use_dayofyear_embedding} (dim: {config.dayofyear_embedding_dim})")
+    print(f"Using 2D location embedding: {config.use_2d_location_embedding} (channels: {config.location_embedding_channels})") # MODIFIED
 
     # 1. Prepare Data
-    # Pass image_size as a tuple and the channel_wise_normalization flag
     if config.real_data:
-        data, land_mask, min_val, max_val = load_ocean_data(
+        data, land_mask, day_of_year_data, location_field_data, min_val, max_val = load_ocean_data(
             config.filepath_t,
             config.image_size, config.channels,
             time_range=config.training_day_range,
@@ -102,39 +70,61 @@ if __name__ == "__main__":
             max_val_in=[config.T_range[1],config.S_range[1]]
         )
     else:
-        data, land_mask = generate_synthetic_ocean_data(
+        data, land_mask, day_of_year_data, location_field_data = generate_synthetic_ocean_data(
             config.data_points, config.image_size, config.channels, 
             config.use_salinity, config.channel_wise_normalization
         )
 
     print(f"Data size: {data.shape}")
     print(f"Land mask size: {land_mask.shape}")
+    if config.use_dayofyear_embedding: print(f"Day of Year data size: {day_of_year_data.shape}")
+    if config.use_2d_location_embedding: print(f"2D Location Field data size: {location_field_data.shape}") # MODIFIED
 
-    # Split data into training and validation sets
-    val_size = int(config.validation_split * len(data))
-    train_size = len(data) - val_size
-    train_data, val_data = random_split(data, [train_size, val_size])
+    # Create a custom dataset that yields the additional embeddings
+    class CustomOceanDataset(torch.utils.data.Dataset):
+        def __init__(self, data, dayofyear, location_field): # MODIFIED
+            self.data = data
+            self.dayofyear = dayofyear
+            self.location_field = location_field # MODIFIED
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            # Returns data, day_of_year, and location_field for the given index # MODIFIED
+            return self.data[idx], self.dayofyear[idx], self.location_field[idx] # MODIFIED
+
+    # Initialize CustomOceanDataset with the loaded data
+    full_dataset = CustomOceanDataset(data, day_of_year_data, location_field_data) # MODIFIED
+
+    # Split dataset into training and validation sets
+    val_size = int(config.validation_split * len(full_dataset))
+    train_size = len(full_dataset) - val_size
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
     # Create DataLoaders for batching and shuffling data during training
-    train_loader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=config.batch_size, shuffle=False) # No shuffling for validation
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False) # No shuffling for validation
     
     # Move the static land_mask to the chosen device once
     land_mask = land_mask.to(config.device)
 
-    # NEW: Generate training data animation if enabled
+    # Generate training data animation if enabled
     if config.generate_training_animation:
         create_training_animation(data, land_mask, config.channels, config.use_salinity, config.training_animation_path)
 
     # 2. Initialize Model and Diffusion Process
-    # Pass image_size to UNet constructor
     model = UNet(
         in_channels=config.channels, 
         out_channels=config.channels, 
-        image_size=config.image_size,
-        base_channels=config.unet_width).to(config.device) # Instantiate the U-Net model and move to device
-    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate) # Initialize Adam optimizer
-    start_epoch = 0 # Default start epoch
+        base_channels=config.base_unet_channels,
+        use_dayofyear_embedding=config.use_dayofyear_embedding,
+        dayofyear_embedding_dim=config.dayofyear_embedding_dim,
+        use_2d_location_embedding=config.use_2d_location_embedding,
+        location_embedding_channels=config.location_embedding_channels).to(config.device) # Instantiate the U-Net model and move to device
+
+    optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+    start_epoch = 0
 
     # Load model if configured to do so
     if config.load_model_for_sampling:
@@ -144,7 +134,7 @@ if __name__ == "__main__":
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             start_epoch = checkpoint['epoch'] # The epoch when the model was saved
-            print(f"Model loaded. Training will resume from epoch {start_epoch + 1} (or skip if training not desired).")
+            print(f"Model loaded. Training will resume from epoch {start_epoch + 1} or skip if training not desired.")
         else:
             print(f"No checkpoint found at {config.model_checkpoint_path}. Starting training from scratch.")
             start_epoch = 0 # Ensure training starts from 0 if no checkpoint is found
@@ -162,7 +152,10 @@ if __name__ == "__main__":
     # 3. Train the model (if not loading for sampling only)
     train_losses, val_losses = [], [] # Initialize loss lists
     if not config.load_model_for_sampling or start_epoch == 0: 
-        train_losses, val_losses = train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer, config.epochs, config.device, land_mask, start_epoch)
+        train_losses, val_losses = train_diffusion_model(
+            model, train_loader, val_loader, diffusion, optimizer, 
+            config.epochs, config.device, land_mask, start_epoch, 
+            config.use_dayofyear_embedding, config.use_2d_location_embedding)
 
         # Save model after training if configured
         if config.save_model_after_training:
@@ -180,15 +173,13 @@ if __name__ == "__main__":
     if train_losses and val_losses: # Only plot if training actually occurred and losses were collected
         plot_losses(train_losses, val_losses, config.loss_plot_save_path)
 
-
     # 4. Prepare Sparse Observations for Conditional Sampling
     img_h, img_w = config.image_size
     sample_shape = (1, config.channels, img_h, img_w)
     
-    # Generate a new "true" sample to serve as the ground truth for observations
-    # Set num_samples=1 as we only need one for this demonstration
+    # Load a new "true" sample to serve as the ground truth for observations
     if config.real_data:
-        true_sample, _, _, _ = load_ocean_data(
+        true_sample, _, true_day_of_year_single, true_location_field_single, _, _ = load_ocean_data( # MODIFIED
             config.filepath_t_test,
             config.image_size, config.channels,
             time_range=config.sample_day_range,
@@ -199,26 +190,26 @@ if __name__ == "__main__":
             max_val_in=[config.T_range[1],config.S_range[1]]
         )
     else:
-        true_sample, _ = generate_synthetic_ocean_data(
+        true_sample, _, true_day_of_year_single, true_location_field_single = generate_synthetic_ocean_data( # MODIFIED
             num_samples=1,
             image_size=config.image_size,
             channels=config.channels,
             use_salinity=config.use_salinity,
             channel_wise_normalization=config.channel_wise_normalization
         )
-    true_sample = true_sample.to(config.device) # Move to device
+    true_sample = true_sample.to(config.device)
+
+    # Extract scalar day of year and the 2D location field
+    target_doy = true_day_of_year_single.item() if true_day_of_year_single.numel() > 0 else None
+    target_location_field_for_sampling = true_location_field_single[0:1, :, :, :].to(config.device)
 
     # Initialize observation tensors based on the shape of the true_sample
     observations_for_sampling = torch.zeros_like(true_sample)
     observed_mask_for_sampling = torch.zeros_like(true_sample, dtype=torch.bool)
 
     # Randomly select a few observation points from the true_sample
-    num_obs_points = config.observation_samples # Number of random observation points
-    
-    # Find all valid ocean coordinates
+    num_obs_points = config.observation_samples
     ocean_coords_h, ocean_coords_w = np.where(land_mask[0, 0].cpu().numpy() == 1)
-    
-    # Combine into a list of (y, x) tuples
     all_ocean_points = list(zip(ocean_coords_h, ocean_coords_w))
 
     if len(all_ocean_points) < num_obs_points:
@@ -230,16 +221,11 @@ if __name__ == "__main__":
     obs_points_actual = []
     for idx in sampled_indices:
         y, x = all_ocean_points[idx]
-        for c in range(config.channels): # Sample for each enabled channel
-            val = true_sample[0, c, y, x].item() # Get the true value at this point
+        for c in range(config.channels):
+            val = true_sample[0, c, y, x].item()
             observations_for_sampling[0, c, y, x] = val
             observed_mask_for_sampling[0, c, y, x] = True
-            obs_points_actual.append((c, y, x, val)) # Store the actual sampled point
-
-    # print("\nSparse observations defined (sampled from generated true image):")
-    # for c, y, x, val in obs_points_actual:
-    #     channel_name = "Temperature" if c == 0 else "Salinity"
-        # print(f"- {channel_name} at ({y},{x}): {val:.4f}")
+            obs_points_actual.append((c, y, x, val))
 
     # 5. Perform Conditional Sampling
     generated_samples = sample_conditional(
@@ -250,12 +236,16 @@ if __name__ == "__main__":
         observed_mask=observed_mask_for_sampling,
         land_mask=land_mask,
         channels=config.channels,
-        image_size=config.image_size, # Pass the tuple
+        image_size=config.image_size,
         device=config.device,
-        sampling_method=config.sampling_method, # Use method from config
-        observation_fidelity_weight=config.observation_fidelity_weight # Use weight from config
+        sampling_method=config.sampling_method,
+        observation_fidelity_weight=config.observation_fidelity_weight,
+        target_dayofyear=target_doy,
+        target_location_field=target_location_field_for_sampling,
+        config=config # Pass the full config object
     )
 
+    # Get climatological prediction as baseline skills
     ds_t_training = xr.open_mfdataset(config.filepath_t)
     da_t_training = ds_t_training[config.varname_t]
     clim_t = da_t_training.groupby('time.dayofyear').mean('time')
@@ -281,9 +271,7 @@ if __name__ == "__main__":
     true_sample_np = true_sample[0].cpu().numpy() # Convert the true sample to numpy
     land_mask_np = land_mask[0, 0].cpu().numpy()
 
-    # Determine number of subplots dynamically: 2 rows (True, Generated), N channels
-    num_cols = config.channels if config.use_salinity else 1
-    plt.figure(figsize=(16, 18)) # Adjust figure size
+    plt.figure(figsize=(16, 18))
 
     # Plot True Temperature Map
     plt.subplot(3, 2, 1) 
@@ -334,11 +322,6 @@ if __name__ == "__main__":
     plt.title(f'Generated Temperature Map (Ocean Only) RMSE:{rmse:.3f}')
     plt.xlabel('X-coordinate')
     plt.ylabel('Y-coordinate')
-    # # Overlay sampled observation points for temperature on generated map
-    # for c, y, x, val in obs_points_actual:
-    #     if c == 0 and land_mask_np[y, x] == 1:
-    #         plt.scatter(x, y, color='black', marker='o', s=1)
-    #         # plt.text(x + 1, y + 1, f'{val:.2f}', color='white', fontsize=8, ha='left', va='top', bbox=dict(facecolor='red', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.2'))
 
     plt.subplot(3, 2, 6) # Position below true temp map
     mae = np.mean(np.abs(masked_generated_temp-masked_true_temp))
@@ -352,26 +335,37 @@ if __name__ == "__main__":
     for c, y, x, val in obs_points_actual:
         if c == 0 and land_mask_np[y, x] == 1:
             plt.scatter(x, y, color='black', marker='o', s=1)
-            # plt.text(x + 1, y + 1, f'{val:.2f}', color='white', fontsize=8, ha='left', va='top', bbox=dict(facecolor='red', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.2'))
+    
+    plt.tight_layout()
+    plt.savefig(config.plot_save_path_t) # Save the plot to a file
+    plt.show()
 
     # Plot Salinity Maps if enabled
     if config.use_salinity:
+        plt.figure(figsize=(16, 18))
+
         # Plot True Salinity Map
-        plt.subplot(3, num_cols, 2) # Position next to true temp map
+        plt.subplot(3, 2, 1) # Position next to true temp map
         masked_true_sal = np.ma.masked_where(land_mask_np == 0, true_sample_np[1])
         plt.imshow(masked_true_sal, cmap='plasma', origin='lower', vmin=0., vmax=1.)
         plt.colorbar(label='Normalized Salinity')
         plt.title('True Salinity Map (Ocean Only)')
         plt.xlabel('X-coordinate')
         plt.ylabel('Y-coordinate')
+
+        plt.subplot(3, 2, 2) # Position next to true temp map
         # Overlay sampled observation points for salinity on true map
         for c, y, x, val in obs_points_actual:
             if c == 1 and land_mask_np[y, x] == 1:
                 plt.scatter(x, y, c=val, cmap='viridis', vmin=0., vmax=1., marker='o', s=5)
                 # plt.text(x + 1, y + 1, f'{val:.2f}', color='white', fontsize=8, ha='left', va='top', bbox=dict(facecolor='blue', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.2'))
+        plt.colorbar(label='Normalized Salinity')
+        plt.title('True Salinity Map (Ocean Only)')
+        plt.xlabel('X-coordinate')
+        plt.ylabel('Y-coordinate')
 
         # Plot Climatology Salinity Map
-        plt.subplot(3, num_cols, 2 + num_cols) # Position below true sal map
+        plt.subplot(3, 2, 3) # Position below true sal map
         rmse = np.sqrt(np.mean((clim_s_pred-masked_true_sal)**2))
         plt.imshow(clim_s_pred, cmap='plasma', origin='lower', vmin=0., vmax=1.)
         plt.colorbar(label='Normalized Salinity')
@@ -379,8 +373,16 @@ if __name__ == "__main__":
         plt.xlabel('X-coordinate')
         plt.ylabel('Y-coordinate')
 
+        plt.subplot(3, 2, 4) # Position below true sal map
+        mae = np.mean(np.abs(clim_s_pred-masked_true_sal))
+        plt.imshow(clim_s_pred-masked_true_sal, cmap='bwr', origin='lower', vmin=-1., vmax=1.)
+        plt.colorbar(label='Normalized Salinity')
+        plt.title(f'Generated Salinity Map (Ocean Only) MAE:{mae:.3f}')
+        plt.xlabel('X-coordinate')
+        plt.ylabel('Y-coordinate')
+
         # Plot Generated Salinity Map
-        plt.subplot(3, num_cols, 2 + num_cols*2) # Position below true sal map
+        plt.subplot(3, 2, 5) # Position below true sal map
         masked_generated_sal = np.ma.masked_where(land_mask_np == 0, generated_sample_np[1])
         rmse = np.sqrt(np.mean((masked_generated_sal-masked_true_sal)**2))
         plt.imshow(masked_generated_sal, cmap='plasma', origin='lower', vmin=0., vmax=1.)
@@ -388,17 +390,20 @@ if __name__ == "__main__":
         plt.title(f'Generated Salinity Map (Ocean Only) RMSE:{rmse:.3f}')
         plt.xlabel('X-coordinate')
         plt.ylabel('Y-coordinate')
-        # Overlay sampled observation points for salinity on generated map
-        for c, y, x, val in obs_points_actual:
-            if c == 1 and land_mask_np[y, x] == 1:
-                plt.scatter(x, y, color='blue', marker='o', s=3)
-                # plt.text(x + 1, y + 1, f'{val:.2f}', color='white', fontsize=8, ha='left', va='top', bbox=dict(facecolor='blue', alpha=0.5, edgecolor='none', boxstyle='round,pad=0.2'))
 
-    plt.tight_layout()
-    plt.savefig(config.plot_save_path) # Save the plot to a file
-    plt.show()
+        plt.subplot(3, 2, 6) # Position below true sal map
+        mae = np.mean(np.abs(masked_generated_sal-masked_true_sal))
+        plt.imshow(masked_generated_sal-masked_true_sal, cmap='bwr', origin='lower', vmin=-1., vmax=1.)
+        plt.colorbar(label='Normalized Salinity')
+        plt.title(f'Generated Salinity Map (Ocean Only) MAE:{mae:.3f}')
+        plt.xlabel('X-coordinate')
+        plt.ylabel('Y-coordinate')
 
-    print(f"\nModel training and conditional sampling complete. Check the generated plots (saved to {config.plot_save_path}).")
+        plt.tight_layout()
+        plt.savefig(config.plot_save_path_s) # Save the plot to a file
+        plt.show()
+
+    print(f"\nModel training and conditional sampling complete. Check the generated plots (saved to {config.plot_save_path_t}).")
     print(f"Model checkpoint saved to {config.model_checkpoint_path} if enabled in config.")
     print("The red circles represent temperature observation points.")
     print("The blue X's represent salinity observation points.")

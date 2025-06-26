@@ -2,6 +2,9 @@
     "test_id": "test2",
     "image_size": [128, 128],
     "real_data": true,
+    "use_salinity": false,
+    "data_points": 500,
+
     "filepath_t": ["/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2013.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2014.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2015.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2016.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2017.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2018.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2019.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2020.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2021.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2022.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2023.1x1.nc"],
     "filepath_s": ["/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2013.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2014.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2015.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2016.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2017.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2018.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2019.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2020.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2021.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2022.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2023.1x1.nc"],
     "filepath_t_test": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2024.1x1.nc",
@@ -11,21 +14,26 @@
     "lat_range": [26, 154],
     "lon_range": [120, 248],
     "training_day_range": [0, 10000, 1],
-    "sample_day": 270,
-    "use_salinity": false,
+    
     "timesteps": 1000,
     "beta_start": 0.00001,
     "beta_end": 0.01,
-    "unet_width": 64,
+    "base_unet_channels": 64,
     "epochs": 100,
     "batch_size": 200,
     "learning_rate": 0.00001,
-    "data_points": 500,
-    "validation_split": 0.1,
     "channel_wise_normalization": true,
+    "validation_split": 0.1,
+    "save_model_after_training": true,
+
+    "use_dayofyear_embedding": true,
+    "dayofyear_embedding_dim": 64,
+    "use_2d_location_embedding": true,
+    "location_embedding_channels": 2,
+
+    "load_model_for_sampling": false
+    "sample_day": 270,
     "sampling_method": "ddpm",
     "observation_fidelity_weight": 1.0,
     "observation_samples": 1000,
-    "save_model_after_training": true,
-    "load_model_for_sampling": false
 }

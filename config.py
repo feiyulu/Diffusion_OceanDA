@@ -10,56 +10,72 @@ class Config:
         test_id,
         image_size=(128, 128),
         real_data=True, # Added as an argument
+        use_salinity=False,
+        data_points=500, # This is only relevant for synthetic data
+
         filepath_t=None, # Default to None, set dynamically if real_data
         filepath_s=None, # Default to None, set dynamically if real_data
         filepath_t_test=None, # Default to None, set dynamically if real_data
         filepath_s_test=None, # Default to None, set dynamically if real_data
         varname_t='sst', # Default value
         varname_s='sss', # Default value
+
         lat_range=[26,154], # Default value
         lon_range=[120,248], # Default value
         training_day_range=[0,10000,1], # Default value
-        sample_day=270, # Default value
-        sample_day_range=None, # Default to None, set dynamically
         T_range=[-2,33], # Default value
         S_range=[32,37], # Default value
-        use_salinity=False,
+
         timesteps=1000,
         beta_start=1e-5,
         beta_end=0.01,
-        unet_width=32,
+        base_unet_channels=32,
         epochs=100,
         batch_size=200,
         learning_rate=1e-5,
-        data_points=500, # This might only be relevant for synthetic data
-        validation_split=0.1,
         channel_wise_normalization=True,
+        validation_split=0.1,
+        save_model_after_training=True,
+
+        use_dayofyear_embedding=False,
+        dayofyear_embedding_dim=64,
+        use_2d_location_embedding=False,
+        location_embedding_channels=2,
+    
+        load_model_for_sampling=False,
         sampling_method='ddpm',
+        sample_day=270, # Default value
+        sample_day_range=None, # Default to None, set dynamically
         observation_fidelity_weight=1.0,
         observation_samples=1000,
-        # model_checkpoint_path, plot_save_path, training_animation_path are dynamic
-        save_model_after_training=True,
-        load_model_for_sampling=False):
+        ):
         
+        self.test_id = test_id
         self.image_size = image_size
         self.real_data = real_data
+        self.data_points = None if real_data else data_points
+        self.use_salinity = use_salinity
+        self.channels = 2 if self.use_salinity else 1
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Conditional real data file paths
         if self.real_data:
             # Set default values for file paths if not provided
-            self.filepath_t = filepath_t if filepath_t is not None else [f'/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.{year}.1x1.nc' for year in range(2013,2024)]
-            self.filepath_s = filepath_s if filepath_s is not None else [f'/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.{year}.1x1.nc' for year in range(2013,2024)]
-            self.filepath_t_test = filepath_t_test if filepath_t_test is not None else '/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2024.1x1.nc'
-            self.filepath_s_test = filepath_s_test if filepath_s_test is not None else '/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2024.1x1.nc'
+            self.filepath_t = filepath_t 
+            self.filepath_s = filepath_s if self.use_salinity else None
+            self.filepath_t_test = filepath_t_test
+            self.filepath_s_test = filepath_s_test if self.use_salinity else None
             self.varname_t = varname_t
-            self.varname_s = varname_s
+            self.varname_s = varname_s if self.use_salinity else None
             self.lat_range = lat_range
             self.lon_range = lon_range
             self.training_day_range = training_day_range
+            
             self.sample_day = sample_day
-            self.sample_day_range = sample_day_range if sample_day_range is not None else [self.sample_day, self.sample_day + 1, 1]
+            self.sample_day_range = sample_day_range if sample_day_range is not None \
+                else [self.sample_day, self.sample_day + 1, 1]
             self.T_range = T_range
-            self.S_range = S_range
+            self.S_range = S_range if self.use_salinity else None
         else:
             # Set None for real data paths if not using real data
             self.filepath_t = None
@@ -76,33 +92,35 @@ class Config:
             self.T_range = None
             self.S_range = None
 
-        self.test_id = test_id
         self.output_dir = f"/scratch/cimes/feiyul/Diffusion_OceanDA/{self.test_id}"
         if not os.path.isdir(self.output_dir):
             os.mkdir(self.output_dir)
 
-        self.use_salinity = use_salinity
-        self.channels = 2 if self.use_salinity else 1
         self.timesteps = timesteps
         self.beta_start = beta_start
         self.beta_end = beta_end
-        self.unet_width = unet_width
+        self.base_unet_channels = base_unet_channels
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.data_points = data_points
-        self.validation_split = validation_split
         self.channel_wise_normalization = channel_wise_normalization
+        self.validation_split = validation_split
+        self.save_model_after_training = save_model_after_training
+
+        self.use_dayofyear_embedding = use_dayofyear_embedding
+        self.dayofyear_embedding_dim = dayofyear_embedding_dim
+        self.use_2d_location_embedding = use_2d_location_embedding    
+        self.location_embedding_channels = location_embedding_channels
+
+        self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method
         self.observation_fidelity_weight = observation_fidelity_weight
         self.observation_samples = observation_samples
-        self.save_model_after_training = save_model_after_training
-        self.load_model_for_sampling = load_model_for_sampling
 
         # Dynamic paths must be set after their dependencies are defined
         self.model_checkpoint_path = f"{self.output_dir}/ODA_ch{self.channels}_checkpoint_{self.test_id}.pth"
-        self.plot_save_path = f"{self.output_dir}/ODA_{self.test_id}_obs{self.observation_samples}_day{self.sample_day}.png"
+        self.plot_save_path_t = f"{self.output_dir}/ODA_{self.test_id}_obs{self.observation_samples}_day{self.sample_day}_t.png"
+        self.plot_save_path_s = f"{self.output_dir}/ODA_{self.test_id}_obs{self.observation_samples}_day{self.sample_day}_s.png"
         self.loss_plot_save_path = f"{self.output_dir}/loss_plot_{self.test_id}.png"
         self.generate_training_animation = False if self.load_model_for_sampling else True
         self.training_animation_path = f"{self.output_dir}/training_data_animation_{self.test_id}.gif"

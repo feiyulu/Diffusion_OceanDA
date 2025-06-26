@@ -9,7 +9,21 @@ from diffusion_process import Diffusion # For the diffusion process logic
 
 # --- Conditional Sampling Function ---
 @torch.no_grad() # Disable gradient calculations for inference (sampling)
-def sample_conditional(model, diffusion, num_samples, observations, observed_mask, land_mask, channels, image_size, device, sampling_method='ddpm', observation_fidelity_weight=1.0):
+def sample_conditional(
+    model, 
+    diffusion, 
+    num_samples, 
+    observations, 
+    observed_mask, 
+    land_mask, 
+    channels, 
+    image_size, 
+    device, 
+    sampling_method='ddpm', 
+    observation_fidelity_weight=1.0,
+    target_dayofyear=None, 
+    target_location_field=None, 
+    config=None):
     """
     Generates new ocean states conditionally guided by sparse observations and a land mask.
 
@@ -46,11 +60,23 @@ def sample_conditional(model, diffusion, num_samples, observations, observed_mas
     observations_tensor = observations.to(device)
     observed_mask_tensor = observed_mask.to(device)
 
+    # Prepare optional embedding inputs for the model
+    doy_input_for_sampling = None
+    if config.use_dayofyear_embedding:
+        if target_dayofyear is None:
+            raise ValueError("target_dayofyear must be provided if use_dayofyear_embedding is True.")
+        doy_input_for_sampling = torch.full((num_samples,), target_dayofyear, device=device, dtype=torch.long)
+
+    # Prepare 2D location field for sampling
+    loc_field_input_for_sampling = None
+    if config.use_2d_location_embedding:
+        if target_location_field is None:
+            raise ValueError("target_location_field must be provided if use_2d_location_embedding is True.")
+        # target_location_field is (1, 2, H, W), repeat it for num_samples
+        loc_field_input_for_sampling = target_location_field.repeat(num_samples, 1, 1, 1).to(device) # NEW
+
     # Prepare timesteps for DDIM, if used. For DDPM, iterate `reversed(range(0, config.timesteps))`.
     if sampling_method == 'ddim':
-        # For DDIM, we can choose a subset of timesteps for faster sampling.
-        # Here, we'll just use all timesteps for direct comparison to DDPM,
-        # but in practice, you'd use a smaller subset (e.g., np.linspace(0, timesteps - 1, num_inference_steps).astype(int))
         timesteps_to_sample = list(reversed(range(0, diffusion.timesteps)))
     else: # 'ddpm'
         timesteps_to_sample = list(reversed(range(0, diffusion.timesteps)))
@@ -62,9 +88,11 @@ def sample_conditional(model, diffusion, num_samples, observations, observed_mas
     for i_idx, i in enumerate(tqdm(timesteps_to_sample, desc="Sampling")):
         t = torch.full((num_samples,), i, device=device, dtype=torch.long) # Current timestep
 
-        # Predict the noise for the current noisy image x_t, passing the land mask to the model
-        # Pass print_unet_forward_shapes_sample to control verbosity
-        predicted_noise = model(x_t, t, current_land_mask_batch, verbose_forward=print_unet_forward_shapes_sample)
+        # Predict the noise for the current noisy image x_t, passing all conditioning inputs
+        predicted_noise = model(x_t, t, current_land_mask_batch, 
+                                dayofyear_batch=doy_input_for_sampling, 
+                                location_field=loc_field_input_for_sampling, # MODIFIED: Pass location_field
+                                verbose_forward=print_unet_forward_shapes_sample)
 
         # After the first forward pass, set the flag to False to suppress further verbose printing
         if print_unet_forward_shapes_sample:
@@ -73,51 +101,38 @@ def sample_conditional(model, diffusion, num_samples, observations, observed_mas
         # Estimate the clean image (x_0_pred) from x_t and the predicted noise
         x_0_pred = diffusion.predict_x0_from_noise(x_t, t, predicted_noise, current_land_mask_batch)
 
-        # --- Enforce observations for conditional sampling (softer enforcement) ---
-        # The key idea: at each step, after predicting the clean image,
-        # we "blend" the predicted values at the observed locations with the true observations.
-        
-        # Combine the user-provided observed_mask with the global land_mask.
-        # An observation is only valid if it's specified by the user AND it's on an ocean point.
+        # Enforce observations for conditional sampling (softer enforcement) 
         effective_observed_mask = observed_mask_tensor.bool() * land_mask_expanded_channels.bool()
         
-        # Apply softer enforcement: blend predicted x_0 with true observations
-        # x_0_pred_blended = (weight * observation) + ((1-weight) * x_0_pred)
+        # Potential to introduc localization schemes for the observations
         x_0_pred[effective_observed_mask] = (
             observation_fidelity_weight * observations_tensor[effective_observed_mask] +
             (1.0 - observation_fidelity_weight) * x_0_pred[effective_observed_mask]
         )
         
-        # Clamp values to the [0, 1] range to maintain stability and valid data range.
         x_0_pred = torch.clamp(x_0_pred, 0., 1.)
-        # Ensure land points remain 0 after clamping and observation enforcement
         x_0_pred = x_0_pred * land_mask_expanded_channels
 
         # If it's the very last step (t=0), x_0_pred is our final generated sample.
         if i == 0:
             x_t = x_0_pred
         else:
-            # Determine the previous timestep for DDIM/DDPM
-            if sampling_method == 'ddpm': # Use DDPM's specific step logic
-                sqrt_alpha_cumprod_prev_t = diffusion.sqrt_alphas_cumprod[i-1] if i > 0 else torch.tensor(1.0).to(device)
-                sqrt_one_minus_alpha_cumprod_prev_t = diffusion.sqrt_one_minus_alphas_cumprod[i-1] if i > 0 else torch.tensor(0.0).to(device)
+            if sampling_method == 'ddpm':
+                t_prev_index = i - 1 
+                sqrt_alpha_cumprod_prev_t = diffusion.sqrt_alphas_cumprod[t_prev_index] if t_prev_index >= 0 else torch.tensor(1.0).to(device)
+                sqrt_one_minus_alpha_cumprod_prev_t = diffusion.sqrt_one_minus_alphas_cumprod[t_prev_index] if t_prev_index >= 0 else torch.tensor(0.0).to(device)
 
-                # Generate new random noise for the next step, ensuring it's zero at land points.
                 noise_for_next_step = torch.randn_like(x_t) * land_mask_expanded_channels
                 
-                # x_{t-1} = sqrt(alpha_cumprod_{t-1}) * x_0_pred + sqrt(1 - alpha_cumprod_{t-1}) * noise
                 x_t = sqrt_alpha_cumprod_prev_t * x_0_pred + sqrt_one_minus_alpha_cumprod_prev_t * noise_for_next_step
             
             elif sampling_method == 'ddim':
-                # This branch will now only be taken if config.sampling_method is explicitly 'ddim'
-                # which we just changed to 'ddpm'. This code is kept for future flexibility.
                 if i_idx + 1 < len(timesteps_to_sample):
                     t_prev = timesteps_to_sample[i_idx + 1]
                 else:
-                    t_prev = -1 # Sentinel value for the end of sampling
+                    t_prev = -1
                 x_t = diffusion.ddim_sample(model, x_t, t, t_prev, i, current_land_mask_batch)
             
-            # Ensure land points remain 0 after the step
             x_t = x_t * land_mask_expanded_channels
 
-    return x_t # Return the final generated samples
+    return x_t
