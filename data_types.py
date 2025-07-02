@@ -182,7 +182,9 @@ def depth_vertical_coarsen(model_dz,combine_levels):
 
     return model_dz_coarse,model_z_coarse
 
-def variable_vertical_coarsen(Var,model_dz,combine_levels,time_name='time',x_name='xh',y_name='yh',z_name='z'):
+def variable_vertical_coarsen(
+    Var,model_dz,combine_levels,
+    time_name='time',x_name='xh',y_name='yh',z_name='z'):
 
     if combine_levels[-1] > len(model_dz):
         raise Exception('Combine levels exceed depth levels')

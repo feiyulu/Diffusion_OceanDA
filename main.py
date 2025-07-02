@@ -55,19 +55,19 @@ if __name__ == "__main__":
     print(f"Observation fidelity weight: {config.observation_fidelity_weight}")
     print(f"Generate training animation: {config.generate_training_animation}")
     print(f"Using day of year embedding: {config.use_dayofyear_embedding} (dim: {config.dayofyear_embedding_dim})")
-    print(f"Using 2D location embedding: {config.use_2d_location_embedding} (channels: {config.location_embedding_channels})") # MODIFIED
+    print(f"Using 2D location embedding: {config.use_2d_location_embedding} (channels: {config.location_embedding_channels})")
 
     # 1. Prepare Data
     if config.real_data:
-        data, land_mask, day_of_year_data, location_field_data, min_val, max_val = load_ocean_data(
+        data, land_mask, day_of_year_data, location_field_data, T_range, S_range = load_ocean_data(
             config.filepath_t,
             config.image_size, config.channels,
             time_range=config.training_day_range,
             lat_range=config.lat_range,lon_range=config.lon_range,
+            use_salinity=config.use_salinity,
             filepath_s=config.filepath_s,
             variable_names=[config.varname_t, config.varname_s],
-            min_val_in=[config.T_range[0],config.S_range[0]],
-            max_val_in=[config.T_range[1],config.S_range[1]]
+            T_range=config.T_range,S_range=config.S_range
         )
     else:
         data, land_mask, day_of_year_data, location_field_data = generate_synthetic_ocean_data(
@@ -78,24 +78,24 @@ if __name__ == "__main__":
     print(f"Data size: {data.shape}")
     print(f"Land mask size: {land_mask.shape}")
     if config.use_dayofyear_embedding: print(f"Day of Year data size: {day_of_year_data.shape}")
-    if config.use_2d_location_embedding: print(f"2D Location Field data size: {location_field_data.shape}") # MODIFIED
+    if config.use_2d_location_embedding: print(f"2D Location Field data size: {location_field_data.shape}")
 
     # Create a custom dataset that yields the additional embeddings
     class CustomOceanDataset(torch.utils.data.Dataset):
-        def __init__(self, data, dayofyear, location_field): # MODIFIED
+        def __init__(self, data, dayofyear, location_field): 
             self.data = data
             self.dayofyear = dayofyear
-            self.location_field = location_field # MODIFIED
+            self.location_field = location_field
 
         def __len__(self):
             return len(self.data)
 
         def __getitem__(self, idx):
-            # Returns data, day_of_year, and location_field for the given index # MODIFIED
-            return self.data[idx], self.dayofyear[idx], self.location_field[idx] # MODIFIED
+            # Returns data, day_of_year, and location_field for the given index
+            return self.data[idx], self.dayofyear[idx], self.location_field.squeeze()
 
     # Initialize CustomOceanDataset with the loaded data
-    full_dataset = CustomOceanDataset(data, day_of_year_data, location_field_data) # MODIFIED
+    full_dataset = CustomOceanDataset(data, day_of_year_data, location_field_data) 
 
     # Split dataset into training and validation sets
     val_size = int(config.validation_split * len(full_dataset))
@@ -179,18 +179,18 @@ if __name__ == "__main__":
     
     # Load a new "true" sample to serve as the ground truth for observations
     if config.real_data:
-        true_sample, _, true_day_of_year_single, true_location_field_single, _, _ = load_ocean_data( # MODIFIED
+        true_sample, _, true_day_of_year_single, true_location_field_single, _, _ = load_ocean_data(
             config.filepath_t_test,
             config.image_size, config.channels,
             time_range=config.sample_day_range,
             lat_range=config.lat_range,lon_range=config.lon_range,
+            use_salinity=config.use_salinity,
             filepath_s=config.filepath_s_test,
             variable_names=[config.varname_t, config.varname_s],
-            min_val_in=[config.T_range[0],config.S_range[0]],
-            max_val_in=[config.T_range[1],config.S_range[1]]
+            T_range=config.T_range,S_range=config.S_range
         )
     else:
-        true_sample, _, true_day_of_year_single, true_location_field_single = generate_synthetic_ocean_data( # MODIFIED
+        true_sample, _, true_day_of_year_single, true_location_field_single = generate_synthetic_ocean_data(
             num_samples=1,
             image_size=config.image_size,
             channels=config.channels,
@@ -255,15 +255,16 @@ if __name__ == "__main__":
         dayofyear=config.sample_day_range[0]).values-config.T_range[0])/\
             (config.T_range[1]-config.T_range[0])
     print(f'Climatological Temperature Shape: {clim_t_pred.shape}')
-
-    ds_s_training = xr.open_mfdataset(config.filepath_s)
-    da_s_training = ds_s_training[config.varname_s]
-    clim_s = da_s_training.groupby('time.dayofyear').mean('time')
-    clim_s_pred = (clim_s.isel(
-        lat=slice(config.lat_range[0],config.lat_range[1]),
-        lon=slice(config.lon_range[0],config.lon_range[1]),
-        dayofyear=config.sample_day_range[0]).values-config.S_range[0])/\
-            (config.S_range[1]-config.S_range[0])
+    
+    if config.use_salinity: 
+        ds_s_training = xr.open_mfdataset(config.filepath_s)
+        da_s_training = ds_s_training[config.varname_s]
+        clim_s = da_s_training.groupby('time.dayofyear').mean('time')
+        clim_s_pred = (clim_s.isel(
+            lat=slice(config.lat_range[0],config.lat_range[1]),
+            lon=slice(config.lon_range[0],config.lon_range[1]),
+            dayofyear=config.sample_day_range[0]).values-config.S_range[0])/\
+                (config.S_range[1]-config.S_range[0])
 
     # 6. Visualize and Save Results
     print("\nVisualizing and saving results...")

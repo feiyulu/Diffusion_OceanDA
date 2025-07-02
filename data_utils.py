@@ -11,12 +11,13 @@ def load_ocean_data(
     time_range=[0,5000,1], 
     lat_range=[-90,90], 
     lon_range=[0,360],
+    use_salinity=False,
     filepath_mask=None,
     mask_varname=None, 
     filepath_s=None, 
     variable_names=['sst', 'sss'], 
-    min_val_in=None, 
-    max_val_in=None):
+    T_range=None, 
+    S_range=None):
     """
     Loads ocean data from xarray/NetCDF files for temperature and optionally salinity,
     applies spatial and temporal slicing, combines into channels, and normalizes.
@@ -38,15 +39,16 @@ def load_ocean_data(
 
     Returns:
         tuple: (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list, list) -
-               data tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor, actual min_vals, actual max_vals. # MODIFIED: location_field_tensor
+               data tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor, actual min_vals, actual max_vals. 
+               location_field_tensor
                The mask identifies where data is valid (1) vs. NaN/land (0).
     """
     img_h, img_w = image_size
     print(f"Loading real ocean data of size {img_h}x{img_w} with {channels} channel(s)...")
 
     data_vars = []
-    actual_min_vals = []
-    actual_max_vals = []
+    actual_T_range = []
+    actual_S_range = []
     day_of_year_list = []
     # NEW: Prepare for 2D location fields
     location_field_list = []
@@ -69,7 +71,7 @@ def load_ocean_data(
         actual_lons = da.lon.isel(lon=slice(lon_range[0], lon_range[1])).values
         
         # NEW: Create 2D latitude and longitude fields
-        lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons)
+        lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons, indexing='ij')
         
         # Normalize lat/lon grids to [-1, 1] for stable input to model
         normalized_lat_grid = (lat_grid - (-90)) / (90 - (-90)) * 2 - 1
@@ -77,11 +79,12 @@ def load_ocean_data(
         
         # Stack into a (2, H, W) tensor
         location_field_single_sample = np.stack([normalized_lat_grid, normalized_lon_grid], axis=0).astype(np.float32)
+        location_field_list.append(location_field_single_sample)
 
         for t_idx in range(da_sliced.sizes['time']):
             doy = da_sliced.isel(time=t_idx).time.dt.dayofyear.item()
             day_of_year_list.append(doy)
-            location_field_list.append(location_field_single_sample)
+            # location_field_list.append(location_field_single_sample)
 
         # Convert to numpy and handle NaNs for masking
         data_np = da_sliced.values.astype(np.float32)
@@ -117,17 +120,17 @@ def load_ocean_data(
         return normalized_data_np, mask_var, min_val, max_val
 
     # Load Temperature Data
-    if min_val_in and max_val_in:
+    if T_range:
         temp_np, land_mask_temp, min_t, max_t = _load_and_process_data(
             filepath_t, variable_names[0], filepath_mask, mask_varname,
-            min_val_in[0], max_val_in[0])
+            T_range[0], T_range[1])
     else:
         temp_np, land_mask_temp, min_t, max_t = _load_and_process_data(
             filepath_t, variable_names[0], filepath_mask, mask_varname)
 
     data_vars.append(temp_np)
-    actual_min_vals.append(min_t)
-    actual_max_vals.append(max_t)
+    actual_T_range.append(min_t)
+    actual_T_range.append(max_t)
 
     # Load Salinity Data if required
     land_mask_sal = land_mask_temp
@@ -140,8 +143,8 @@ def load_ocean_data(
             sal_np, land_mask_sal, min_s, max_s = _load_and_process_data(
                 filepath_s, variable_names[1], filepath_mask, mask_varname,)
         data_vars.append(sal_np)
-        actual_min_vals.append(min_s)
-        actual_max_vals.append(max_s)
+        actual_S_range.append(min_s)
+        actual_S_range.append(max_s)
         
     elif channels == 2 and (filepath_s is None or len(variable_names) <= 1):
         print("Warning: Configured for 2 channels (Temp+Salinity) but salinity file or varname is missing. Proceeding with 1 channel (Temperature only).")
@@ -159,13 +162,13 @@ def load_ocean_data(
     print(f"Combined Land mask shape: {land_mask_tensor.shape}")
 
     day_of_year_tensor = torch.tensor(day_of_year_list, dtype=torch.long)
-    # NEW: Convert list of 2D location fields to a single tensor (N, 2, H, W)
+    # Convert list of 2D location fields to a single tensor (N, 2, H, W)
     location_field_tensor = torch.tensor(np.stack(location_field_list, axis=0), dtype=torch.float32) 
     
     print(f"Dayofyear embedding data shape: {day_of_year_tensor.shape}")
     print(f"Location embedding data shape: {location_field_tensor.shape}")
 
-    return data_tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor, actual_min_vals, actual_max_vals
+    return data_tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor, actual_T_range, actual_S_range
 
 def generate_synthetic_ocean_data(num_samples, image_size, channels, use_salinity, channel_wise_normalization=False):
     """
@@ -183,7 +186,8 @@ def generate_synthetic_ocean_data(num_samples, image_size, channels, use_salinit
 
     Returns:
         tuple: (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor) -
-               data tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor. # MODIFIED: location_field_tensor instead of lat_lon_tensor
+               data tensor, land_mask_tensor, day_of_year_tensor,
+               location_field_tensor: location_field_tensor instead of lat_lon_tensor
     """
     img_h, img_w = image_size
     print(f"Generating synthetic ocean data of size {img_h}x{img_w} with {channels} channel(s)...")
@@ -305,7 +309,7 @@ def generate_synthetic_ocean_data(num_samples, image_size, channels, use_salinit
     print(f"Land mask shape: {land_mask_tensor.shape}")
     
     day_of_year_tensor = torch.tensor(day_of_year_list, dtype=torch.long) # Day of year as long (categorical or integer)
-    # MODIFIED: Repeat location_field_tensor for each sample in the batch
-    location_field_tensor_batch = location_field_tensor.repeat(num_samples, 1, 1, 1)
+    # Repeat location_field_tensor for each sample in the batch
+    # location_field_tensor_batch = location_field_tensor.repeat(num_samples, 1, 1, 1)
 
-    return normalized_data_tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor_batch
+    return normalized_data_tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor
