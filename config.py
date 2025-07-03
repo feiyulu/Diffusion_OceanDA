@@ -33,6 +33,7 @@ class Config:
         epochs=100,
         batch_size=200,
         learning_rate=1e-5,
+        gradient_accumulation_steps=1,
         channel_wise_normalization=True,
         validation_split=0.1,
         save_model_after_training=True,
@@ -103,6 +104,7 @@ class Config:
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.gradient_accumulation_steps = gradient_accumulation_steps
         self.channel_wise_normalization = channel_wise_normalization
         self.validation_split = validation_split
         self.save_model_after_training = save_model_after_training

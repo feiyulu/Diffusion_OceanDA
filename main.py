@@ -56,6 +56,7 @@ if __name__ == "__main__":
     print(f"Generate training animation: {config.generate_training_animation}")
     print(f"Using day of year embedding: {config.use_dayofyear_embedding} (dim: {config.dayofyear_embedding_dim})")
     print(f"Using 2D location embedding: {config.use_2d_location_embedding} (channels: {config.location_embedding_channels})")
+    print(f"Gradient Accumulation Steps: {config.gradient_accumulation_steps}")
 
     # 1. Prepare Data
     if config.real_data:
@@ -154,8 +155,11 @@ if __name__ == "__main__":
     if not config.load_model_for_sampling or start_epoch == 0: 
         train_losses, val_losses = train_diffusion_model(
             model, train_loader, val_loader, diffusion, optimizer, 
-            config.epochs, config.device, land_mask, start_epoch, 
-            config.use_dayofyear_embedding, config.use_2d_location_embedding)
+            config.epochs, config.device, land_mask, 
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
+            start_epoch=start_epoch, 
+            use_dayofyear_embedding=config.use_dayofyear_embedding,
+            use_2d_location_embedding=config.use_2d_location_embedding)
 
         # Save model after training if configured
         if config.save_model_after_training:

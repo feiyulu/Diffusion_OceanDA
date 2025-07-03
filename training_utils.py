@@ -24,6 +24,7 @@ def train_diffusion_model(
     epochs, 
     device, 
     land_mask, 
+    gradient_accumulation_steps=1,
     start_epoch=0,
     use_dayofyear_embedding=False,
     use_2d_location_embedding=False):
@@ -39,6 +40,7 @@ def train_diffusion_model(
         epochs (int): Number of training epochs.
         device (torch.device): Device to perform computations on (CPU/CUDA).
         land_mask (torch.Tensor): Global land/ocean mask (1, 1, H, W).
+        gradient_accumulation_steps (int): Number of steps to accumulate gradients before optimizing.
         start_epoch (int): The epoch to start training from (useful for resuming).
     
     Returns:
@@ -56,8 +58,11 @@ def train_diffusion_model(
     for epoch in range(start_epoch, epochs): # Start from `start_epoch`
         total_train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} (Training)")
-        for batch_idx, (x_0, dayofyear_batch, location_field_batch) in enumerate(pbar): # MODIFIED
-            optimizer.zero_grad()
+
+        # Zero gradients at the start of each accumulation cycle
+        optimizer.zero_grad() 
+
+        for batch_idx, (x_0, dayofyear_batch, location_field_batch) in enumerate(pbar):
             x_0 = x_0.to(device)
             current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1).to(device)
             
@@ -71,19 +76,36 @@ def train_diffusion_model(
 
             predicted_epsilon = model(x_t, t, current_land_mask, 
                                       dayofyear_batch=doy_input, 
-                                      location_field=loc_field_input, # MODIFIED: Pass location_field
+                                      location_field=loc_field_input,
                                       verbose_forward=print_unet_forward_shapes_train) 
 
             if print_unet_forward_shapes_train:
                 print_unet_forward_shapes_train = False
 
+            # Calculate loss (MSE between true noise and predicted noise)
+            # Scale loss by gradient_accumulation_steps
             loss = F.mse_loss(predicted_epsilon * current_land_mask.float(),
-                              true_epsilon * current_land_mask.float())
-            total_train_loss += loss.item()
+                              true_epsilon * current_land_mask.float()) / gradient_accumulation_steps
 
             loss.backward()
+
+            # Perform optimizer step and zero gradients only after accumulation steps
+            if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                # Gradient clipping (optional, but good practice for diffusion models)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad() # Zero gradients after optimization
+
+            total_train_loss += loss.item() * gradient_accumulation_steps # Unscale loss for reporting
+
+            pbar.set_postfix(loss=loss.item() * gradient_accumulation_steps) # Unscale for display
+
+        # Ensure any remaining accumulated gradients are applied at the end of the epoch
+        # This handles cases where the total number of batches is not a multiple of gradient_accumulation_steps
+        if (batch_idx + 1) % gradient_accumulation_steps != 0:
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            pbar.set_postfix(loss=loss.item())
+            optimizer.zero_grad()
 
         avg_train_loss = total_train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
@@ -94,7 +116,7 @@ def train_diffusion_model(
         total_val_loss = 0
         with torch.no_grad(): # No gradients needed for validation
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} (Validation)")
-            for batch_idx, (x_0_val, dayofyear_batch_val, location_field_batch_val) in enumerate(val_pbar): # MODIFIED
+            for batch_idx, (x_0_val, dayofyear_batch_val, location_field_batch_val) in enumerate(val_pbar): 
                 x_0_val = x_0_val.to(device)
                 current_land_mask_val = land_mask.repeat(x_0_val.shape[0], 1, 1, 1).to(device)
                 
@@ -108,7 +130,7 @@ def train_diffusion_model(
 
                 predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, 
                                               dayofyear_batch=doy_input_val, 
-                                              location_field=loc_field_input_val, # MODIFIED
+                                              location_field=loc_field_input_val,
                                               verbose_forward=False) # No verbose for val
 
                 val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val.float(),
