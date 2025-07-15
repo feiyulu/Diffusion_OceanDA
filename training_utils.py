@@ -27,7 +27,13 @@ def train_diffusion_model(
     gradient_accumulation_steps=1,
     start_epoch=0,
     use_dayofyear_embedding=False,
-    use_2d_location_embedding=False):
+    use_2d_location_embedding=False,
+    save_interval=10,
+    checkpoint_dir="checkpoints",
+    test_id="default_test",
+    channels=1,
+    loss_plot_dir="plots"
+    ):
     """
     Trains the diffusion U-Net model and evaluates on a validation set.
 
@@ -42,6 +48,10 @@ def train_diffusion_model(
         land_mask (torch.Tensor): Global land/ocean mask (1, 1, H, W).
         gradient_accumulation_steps (int): Number of steps to accumulate gradients before optimizing.
         start_epoch (int): The epoch to start training from (useful for resuming).
+        save_interval (int): How often (in epochs) to save a model checkpoint.
+        checkpoint_dir (str): Directory where checkpoints will be saved.
+        test_id (str): Identifier for the current test/run, used in checkpoint filenames.
+        channels (int): Number of channels, used in checkpoint filenames.
     
     Returns:
         tuple: (list, list) - lists of training losses and validation losses per epoch.
@@ -54,6 +64,9 @@ def train_diffusion_model(
 
     # Flag to control verbose printing in UNet.forward for the first iteration
     print_unet_forward_shapes_train = True 
+
+    land_mask = land_mask.to(device)
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(start_epoch, epochs): # Start from `start_epoch`
         total_train_loss = 0
@@ -142,6 +155,25 @@ def train_diffusion_model(
         val_losses.append(avg_val_loss)
         print(f"Epoch {epoch+1} finished, Average Validation Loss: {avg_val_loss:.4f}")
         model.train() # Set model back to training mode for next epoch
+
+        # Save checkpoint periodically
+        if (epoch + 1) % save_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, 
+                                           f"ODA_ch{channels}_{test_id}_epoch_{epoch+1}.pth")
+            print(f"Saving checkpoint to {checkpoint_path}...")
+            torch.save({
+                'epoch': epoch, # Save the last completed epoch
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, checkpoint_path)
+            print("Checkpoint saved.")
+
+            # Save loss plot
+            plot_save_dir = os.path.dirname(loss_plot_dir)
+            plot_filename = f"loss_plot_{test_id}_epoch_{epoch+1}.png"
+            specific_plot_path = os.path.join(plot_save_dir, plot_filename)
+            plot_losses(train_losses, val_losses, specific_plot_path)
+            print(f"Loss plot for epoch {epoch+1} saved to {specific_plot_path}")
 
     return train_losses, val_losses
 

@@ -8,7 +8,8 @@ def load_ocean_data(
     filepath_t, 
     image_size, 
     channels, 
-    time_range=[0,5000,1], 
+    time_range=["20130101","20131231"],
+    time_interval=1,
     lat_range=[-90,90], 
     lon_range=[0,360],
     use_salinity=False,
@@ -17,7 +18,10 @@ def load_ocean_data(
     filepath_s=None, 
     variable_names=['sst', 'sss'], 
     T_range=None, 
-    S_range=None):
+    S_range=None,
+    co2_filepath=None,
+    co2_varname="co2",
+    co2_range=[320,450]):
     """
     Loads ocean data from xarray/NetCDF files for temperature and optionally salinity,
     applies spatial and temporal slicing, combines into channels, and normalizes.
@@ -28,7 +32,8 @@ def load_ocean_data(
         filepath_t (list or str): Path(s) to the data file(s) for temperature (e.g., NetCDF).
         image_size (tuple): The expected spatial dimensions (height, width).
         channels (int): Number of channels (1 for Temp, 2 for Temp+Salinity).
-        time_range (list): [start_idx, end_idx, step_size] for time dimension.
+        time_range (list): [start_time, end_time] for time dimension.
+        time_interval (int): slice interval
         lat_range (list): [start_idx, end_idx] for latitude dimension (indices).
         lon_range (list): [start_idx, end_idx] for longitude dimension (indices).
         filepath_mask (list or str, optional): Path to the land mask file
@@ -36,6 +41,9 @@ def load_ocean_data(
         variable_names (list): List of variable names to load as channels, e.g., ['sst', 'sss'].
         min_val_in (list, optional): List of minimum values for normalization for each channel [min_temp, min_sal].
         max_val_in (list, optional): List of maximum values for normalization for each channel [max_temp, max_sal].
+        co2_filepath:
+        co2_varname:
+        co2_range:
 
     Returns:
         tuple: (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list, list) -
@@ -50,7 +58,7 @@ def load_ocean_data(
     actual_T_range = []
     actual_S_range = []
     day_of_year_list = []
-    # NEW: Prepare for 2D location fields
+    co2_daily_list = []
     location_field_list = []
 
     def _load_and_process_data(
@@ -62,9 +70,11 @@ def load_ocean_data(
         da = ds[varname]
 
         # Slice time, lat, lon
-        da_sliced = da.isel(time=slice(time_range[0], time_range[1], time_range[2]),
-                             lat=slice(lat_range[0], lat_range[1]),
-                             lon=slice(lon_range[0], lon_range[1]))
+        da_sliced = da.sel(
+            time=slice(time_range[0], time_range[1], time_interval)
+            ).isel(
+                lat=slice(lat_range[0], lat_range[1]),
+                lon=slice(lon_range[0], lon_range[1]))
         
         # Get actual lat/lon values for the sliced range
         actual_lats = da.lat.isel(lat=slice(lat_range[0], lat_range[1])).values
@@ -150,6 +160,11 @@ def load_ocean_data(
         print("Warning: Configured for 2 channels (Temp+Salinity) but salinity file or varname is missing. Proceeding with 1 channel (Temperature only).")
         channels = 1
 
+    co2_ds = xr.open_dataset(co2_filepath)
+    co2_da = co2_ds[co2_varname]
+    co2_sliced = co2_da.sel(time=slice(time_range[0], time_range[1], time_interval))
+    co2_normalized = (co2_sliced-co2_range[0])/(co2_range[1]-co2_range[0])
+
     data_tensor = torch.tensor(np.stack(data_vars, axis=1), dtype=torch.float32)
 
     combined_land_mask_np = (land_mask_temp * land_mask_sal).astype(np.float32)
@@ -162,13 +177,17 @@ def load_ocean_data(
     print(f"Combined Land mask shape: {land_mask_tensor.shape}")
 
     day_of_year_tensor = torch.tensor(day_of_year_list, dtype=torch.long)
+    co2_daily_tensor = torch.tensor(co2_normalized.values, dtype=torch.long)
     # Convert list of 2D location fields to a single tensor (N, 2, H, W)
     location_field_tensor = torch.tensor(np.stack(location_field_list, axis=0), dtype=torch.float32) 
     
     print(f"Dayofyear embedding data shape: {day_of_year_tensor.shape}")
+    print(f"CO2 embedding data shape: {co2_daily_tensor.shape}")
     print(f"Location embedding data shape: {location_field_tensor.shape}")
 
-    return data_tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor, actual_T_range, actual_S_range
+    return data_tensor, land_mask_tensor, \
+        day_of_year_tensor, co2_daily_tensor, location_field_tensor, \
+            actual_T_range, actual_S_range
 
 def generate_synthetic_ocean_data(num_samples, image_size, channels, use_salinity, channel_wise_normalization=False):
     """

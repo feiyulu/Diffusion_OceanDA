@@ -22,7 +22,9 @@ class Config:
 
         lat_range=[26,154], # Default value
         lon_range=[120,248], # Default value
-        training_day_range=[0,10000,1], # Default value
+        training_day_range=["20130101", "20141231"],
+        training_day_interval=1,
+    
         T_range=[-2,33], # Default value
         S_range=[32,37], # Default value
 
@@ -37,16 +39,20 @@ class Config:
         channel_wise_normalization=True,
         validation_split=0.1,
         save_model_after_training=True,
+        save_interval=10,
 
         use_dayofyear_embedding=False,
         dayofyear_embedding_dim=64,
         use_2d_location_embedding=False,
         location_embedding_channels=2,
     
+        co2_filepath=None,
+        use_co2_embedding=False,
+        co2_embedding_dim=64,
+
         load_model_for_sampling=False,
         sampling_method='ddpm',
-        sample_day=270, # Default value
-        sample_day_range=None, # Default to None, set dynamically
+        sample_days=[0],
         observation_fidelity_weight=1.0,
         observation_samples=1000,
         ):
@@ -71,10 +77,9 @@ class Config:
             self.lat_range = lat_range
             self.lon_range = lon_range
             self.training_day_range = training_day_range
+            self.training_day_interval = training_day_interval
             
-            self.sample_day = sample_day
-            self.sample_day_range = sample_day_range if sample_day_range is not None \
-                else [self.sample_day, self.sample_day + 1, 1]
+            self.sample_days = sample_days
             self.T_range = T_range
             self.S_range = S_range if self.use_salinity else None
         else:
@@ -88,8 +93,8 @@ class Config:
             self.lat_range = None
             self.lon_range = None
             self.training_day_range = None
-            self.sample_day = None
-            self.sample_day_range = None
+            self.training_day_interval = None
+            self.sample_days = None
             self.T_range = None
             self.S_range = None
 
@@ -108,11 +113,16 @@ class Config:
         self.channel_wise_normalization = channel_wise_normalization
         self.validation_split = validation_split
         self.save_model_after_training = save_model_after_training
+        self.save_interval = save_interval
 
         self.use_dayofyear_embedding = use_dayofyear_embedding
         self.dayofyear_embedding_dim = dayofyear_embedding_dim
         self.use_2d_location_embedding = use_2d_location_embedding    
         self.location_embedding_channels = location_embedding_channels
+        
+        self.co2_filepath = co2_filepath
+        self.use_co2_embedding = use_co2_embedding
+        self.co2_embedding_dim = co2_embedding_dim
 
         self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method
@@ -120,10 +130,13 @@ class Config:
         self.observation_samples = observation_samples
 
         # Dynamic paths must be set after their dependencies are defined
-        self.model_checkpoint_path = f"{self.output_dir}/ODA_ch{self.channels}_checkpoint_{self.test_id}.pth"
-        self.plot_save_path_t = f"{self.output_dir}/ODA_{self.test_id}_obs{self.observation_samples}_day{self.sample_day}_t.png"
-        self.plot_save_path_s = f"{self.output_dir}/ODA_{self.test_id}_obs{self.observation_samples}_day{self.sample_day}_s.png"
-        self.loss_plot_save_path = f"{self.output_dir}/loss_plot_{self.test_id}.png"
+        self.model_checkpoint_dir = f"{self.output_dir}/checkpoints"
+        os.makedirs(self.model_checkpoint_dir, exist_ok=True)
+        self.loss_plot_dir = f"{self.output_dir}/loss_plots"
+        os.makedirs(self.loss_plot_dir, exist_ok=True)
+        self.sample_plot_dir = f"{self.output_dir}/sample_plots"
+        os.makedirs(self.sample_plot_dir, exist_ok=True)
+
         self.generate_training_animation = False if self.load_model_for_sampling else True
         self.training_animation_path = f"{self.output_dir}/training_data_animation_{self.test_id}.gif"
 
@@ -163,7 +176,7 @@ class Config:
         # or ensure they are properly handled if they rely on other dynamic vars.
         # For simplicity, we'll exclude them if they are f-strings based on other values.
         # This assumes the dynamic paths are recreated correctly during from_json_file.
-        for key in ['model_checkpoint_path', 'plot_save_path', 'loss_plot_save_path', 'training_animation_path']:
+        for key in ['model_checkpoint_dir','loss_plot_dir','sample_plot_dir','training_animation_path']:
             if key in settings:
                 del settings[key]
         
