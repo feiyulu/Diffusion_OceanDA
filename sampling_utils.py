@@ -23,6 +23,7 @@ def sample_conditional(
     observation_fidelity_weight=1.0,
     target_dayofyear=None, 
     target_location_field=None, 
+    target_co2_value=None,
     config=None):
     """
     Generates new ocean states conditionally guided by sparse observations and a land mask.
@@ -39,6 +40,10 @@ def sample_conditional(
         device (torch.device): Device to perform computations on.
         sampling_method (str): 'ddpm' for DDPM sampling, 'ddim' for DDIM sampling.
         observation_fidelity_weight (float): Weight for observations (0.0=ignore, 1.0=hard).
+        target_dayofyear (int, optional): Day of year for conditional sampling.
+        target_location_field (torch.Tensor, optional): 2D location field for conditional sampling (1, 2, H, W).
+        target_co2_value (float, optional): CO2 concentration value for conditional sampling.
+        config (Config): The configuration object, used to access embedding flags.
 
     Returns:
         torch.Tensor: Generated ocean states (num_samples, channels, H, W).
@@ -60,20 +65,20 @@ def sample_conditional(
     observations_tensor = observations.to(device)
     observed_mask_tensor = observed_mask.to(device)
 
-    # Prepare optional embedding inputs for the model
-    doy_input_for_sampling = None
-    if config.use_dayofyear_embedding:
-        if target_dayofyear is None:
-            raise ValueError("target_dayofyear must be provided if use_dayofyear_embedding is True.")
-        doy_input_for_sampling = torch.full((num_samples,), target_dayofyear, device=device, dtype=torch.long)
+    # Prepare conditional embedding inputs
+    doy_input = None
+    if config.use_dayofyear_embedding and target_dayofyear is not None:
+        doy_input = torch.full((num_samples,), target_dayofyear, device=device, dtype=torch.long)
+    
+    loc_field_input = None
+    if config.use_2d_location_embedding and target_location_field is not None:
+        # target_location_field is already (1, 2, H, W), repeat for num_samples
+        loc_field_input = target_location_field.repeat(num_samples, 1, 1, 1).to(device)
 
-    # Prepare 2D location field for sampling
-    loc_field_input_for_sampling = None
-    if config.use_2d_location_embedding:
-        if target_location_field is None:
-            raise ValueError("target_location_field must be provided if use_2d_location_embedding is True.")
-        # target_location_field is (1, 2, H, W), repeat it for num_samples
-        loc_field_input_for_sampling = target_location_field.repeat(num_samples, 1, 1, 1).to(device) # NEW
+    co2_input = None
+    if config.use_co2_embedding and target_co2_value is not None:
+        # target_co2_value is a scalar, create a tensor of shape (num_samples,)
+        co2_input = torch.full((num_samples,), target_co2_value, device=device, dtype=torch.float32)
 
     # Prepare timesteps for DDIM, if used. For DDPM, iterate `reversed(range(0, config.timesteps))`.
     if sampling_method == 'ddim':
@@ -90,8 +95,9 @@ def sample_conditional(
 
         # Predict the noise for the current noisy image x_t, passing all conditioning inputs
         predicted_noise = model(x_t, t, current_land_mask_batch, 
-                                dayofyear_batch=doy_input_for_sampling, 
-                                location_field=loc_field_input_for_sampling, # MODIFIED: Pass location_field
+                                dayofyear_batch=doy_input, 
+                                location_field=loc_field_input,
+                                co2_batch=co2_input,
                                 verbose_forward=print_unet_forward_shapes_sample)
 
         # After the first forward pass, set the flag to False to suppress further verbose printing

@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 import xarray as xr # xarray is commonly used for scientific datasets like ocean data
+import pandas as pd
 
 def load_ocean_data(
     filepath_t, 
@@ -32,7 +33,7 @@ def load_ocean_data(
         filepath_t (list or str): Path(s) to the data file(s) for temperature (e.g., NetCDF).
         image_size (tuple): The expected spatial dimensions (height, width).
         channels (int): Number of channels (1 for Temp, 2 for Temp+Salinity).
-        time_range (list): [start_time, end_time] for time dimension.
+        time_range (list): [start_time, end_time] or [select_time] for time dimension.
         time_interval (int): slice interval
         lat_range (list): [start_idx, end_idx] for latitude dimension (indices).
         lon_range (list): [start_idx, end_idx] for longitude dimension (indices).
@@ -66,16 +67,19 @@ def load_ocean_data(
         filepath_mask=None, mask_varname=None, 
         min_val_in=None, max_val_in=None):
 
-        ds = xr.open_mfdataset(filepaths, combine='by_coords')
+        ds = xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True)
         da = ds[varname]
 
         # Slice time, lat, lon
-        da_sliced = da.sel(
-            time=slice(time_range[0], time_range[1], time_interval)
-            ).isel(
-                lat=slice(lat_range[0], lat_range[1]),
-                lon=slice(lon_range[0], lon_range[1]))
-        
+        if len(time_range)==2:
+            da_sliced = da.sel(
+                time=slice(time_range[0], time_range[1], time_interval)).isel(
+                    lat=slice(lat_range[0], lat_range[1]),
+                    lon=slice(lon_range[0], lon_range[1]))
+        elif len(time_range)==1:
+            da_sliced = da.isel(time=time_range).isel(
+                lat=slice(lat_range[0], lat_range[1]),lon=slice(lon_range[0], lon_range[1]))
+
         # Get actual lat/lon values for the sliced range
         actual_lats = da.lat.isel(lat=slice(lat_range[0], lat_range[1])).values
         actual_lons = da.lon.isel(lon=slice(lon_range[0], lon_range[1])).values
@@ -162,9 +166,12 @@ def load_ocean_data(
 
     co2_ds = xr.open_dataset(co2_filepath)
     co2_da = co2_ds[co2_varname]
-    co2_sliced = co2_da.sel(time=slice(time_range[0], time_range[1], time_interval))
+    if len(time_range)==2:
+        co2_sliced = co2_da.sel(time=slice(time_range[0], time_range[1], time_interval))
+    elif len(time_range)==1:
+        co2_sliced = co2_da.isel(time=time_range)
+        
     co2_normalized = (co2_sliced-co2_range[0])/(co2_range[1]-co2_range[0])
-
     data_tensor = torch.tensor(np.stack(data_vars, axis=1), dtype=torch.float32)
 
     combined_land_mask_np = (land_mask_temp * land_mask_sal).astype(np.float32)
@@ -188,147 +195,3 @@ def load_ocean_data(
     return data_tensor, land_mask_tensor, \
         day_of_year_tensor, co2_daily_tensor, location_field_tensor, \
             actual_T_range, actual_S_range
-
-def generate_synthetic_ocean_data(num_samples, image_size, channels, use_salinity, channel_wise_normalization=False):
-    """
-    Generates synthetic ocean temperature and optionally salinity data.
-    This function simulates a 2D ocean grid with some patterns and a land mask.
-    It now supports non-square image dimensions and performs global normalization.
-    Enhanced with more prominent periodic patterns for visualization.
-
-    Args:
-        num_samples (int): Number of synthetic data samples to generate.
-        image_size (tuple): The spatial dimensions (height, width) of the grid.
-        channels (int): Number of channels (1 for Temp, 2 for Temp+Salinity).
-        use_salinity (bool): If True, also generates salinity data.
-        channel_wise_normalization (bool): If False, normalize all channels together based on global min/max.
-
-    Returns:
-        tuple: (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor) -
-               data tensor, land_mask_tensor, day_of_year_tensor,
-               location_field_tensor: location_field_tensor instead of lat_lon_tensor
-    """
-    img_h, img_w = image_size
-    print(f"Generating synthetic ocean data of size {img_h}x{img_w} with {channels} channel(s)...")
-    
-    raw_data = []
-    # Create a simple land mask (e.g., a square "island" in the middle)
-    mask_np = np.ones((img_h, img_w), dtype=np.float32)
-    
-    # Adjust land mask to be a rectangular area relative to the new dimensions
-    land_h_start = img_h // 4
-    land_h_end = img_h - img_h // 4
-    land_w_start = img_w // 4
-    land_w_end = img_w - img_w // 4
-    mask_np[land_h_start:land_h_end, land_w_start:land_w_end] = 0.0 # Set a central rectangular area to land
-    
-    land_mask_tensor = torch.tensor(mask_np[None, None, :, :], dtype=torch.float32) # (1, 1, H, W)
-
-    x_coords = np.linspace(0, 4 * np.pi, img_w) 
-    y_coords = np.linspace(0, 4 * np.pi, img_h) 
-
-    # Define coordinates for a different scale waveform
-    x_coords_fine = np.linspace(0, 8 * np.pi, img_w) # Higher frequency
-    y_coords_fine = np.linspace(0, 8 * np.pi, img_h) # Higher frequency
-
-    day_of_year_list = []
-    # NEW: Prepare for 2D location field
-    lat_field = np.linspace(-1, 1, img_h)[:, None].repeat(img_w, axis=1) # Latitude varies by row
-    lon_field = np.linspace(-1, 1, img_w)[None, :].repeat(img_h, axis=0) # Longitude varies by column
-    location_field_per_sample = np.stack([lat_field, lon_field], axis=0) # Shape (2, H, W)
-    location_field_tensor = torch.tensor(location_field_per_sample[None, :, :, :], dtype=torch.float32) # Shape (1, 2, H, W), will be repeated
-
-    for _ in range(num_samples):
-        # Add a random phase shift for each sample to create movement
-        phase_shift_x = np.random.uniform(-2 * np.pi, 2 * np.pi)
-        phase_shift_y = np.random.uniform(-2 * np.pi, 2 * np.pi)
-
-        X_shifted, Y_shifted = np.meshgrid(x_coords + phase_shift_x, y_coords + phase_shift_y)
-        X_fine_shifted, Y_fine_shifted = np.meshgrid(x_coords_fine + phase_shift_x, y_coords_fine + phase_shift_y)
-
-        # Temperature pattern with more distinct waves
-        temp_base = np.random.rand(img_h, img_w) * 0.1 # Reduced base randomness
-        
-        # Larger scale waveform (amplitude reverted to 0.4 for stability)
-        temp_pattern1_large = np.sin(Y_shifted * 1.5 + X_shifted * 0.8) * 0.4 
-        # Smaller scale waveform (amplitude reduced from 0.2 to 0.1 for smoothness)
-        temp_pattern2_fine = np.cos(Y_fine_shifted * 0.5 - X_fine_shifted * 2) * 0.1 
-        
-        temp = temp_base + temp_pattern1_large + temp_pattern2_fine
-        temp = (temp - temp.min()) / (temp.max() - temp.min()) # Local normalization for pattern visibility
-        temp = temp * 0.8 + 0.1 # Scale to 0.1-0.9 range
-        temp = temp * mask_np # Apply land mask to temperature
-
-        if use_salinity:
-            # Salinity pattern with different distinct waves
-            sal_base = np.random.rand(img_h, img_w) * 0.1
-            
-            # Larger scale waveform (amplitude reverted to 0.4 for stability)
-            sal_pattern1_large = np.cos(Y_shifted * 2.5 + X_shifted * 1.2) * 0.4 
-            # Smaller scale waveform (amplitude reduced from 0.2 to 0.1 for smoothness)
-            sal_pattern2_fine = np.sin(Y_fine_shifted * 0.7 - X_fine_shifted * 3) * 0.1 
-            
-            sal = sal_base + sal_pattern1_large + sal_pattern2_fine
-            sal = (sal - sal.min()) / (sal.max() - sal.min()) # Local normalization for pattern visibility
-            sal = sal * 0.8 + 0.1 # Scale to 0.1-0.9 range
-            sal = sal * mask_np # Apply land mask to salinity
-            sample = np.stack([temp, sal], axis=0) # Stack both channels
-        else:
-            sample = temp[None, :, :] # Add channel dimension for temperature only
-
-        raw_data.append(sample)
-
-        # NEW: Dummy day of year generation for synthetic data
-        day_of_year_list.append(np.random.randint(1, 367)) # Random day of year
-
-    raw_data_tensor = torch.tensor(np.array(raw_data), dtype=torch.float32) # (N, C, H, W)
-
-    # --- Global Normalization (applied over all samples and valid regions) ---
-    normalized_data_tensor = torch.zeros_like(raw_data_tensor)
-    
-    # Expand land_mask_tensor to match raw_data_tensor's batch and channel dimensions for masking
-    full_mask = land_mask_tensor.repeat(num_samples, channels, 1, 1)
-
-    if channel_wise_normalization:
-        print("Performing channel-wise global normalization...")
-        for c in range(channels):
-            # Only consider valid ocean points for min/max calculation
-            valid_channel_data = raw_data_tensor[:, c, :, :][full_mask[:, c, :, :] == 1]
-            if valid_channel_data.numel() > 0: # Check if there's any valid data
-                min_val = valid_channel_data.min()
-                max_val = valid_channel_data.max()
-                if (max_val - min_val) > 1e-6:
-                    normalized_data_tensor[:, c, :, :][full_mask[:, c, :, :] == 1] = \
-                        (valid_channel_data - min_val) / (max_val - min_val)
-                else:
-                    normalized_data_tensor[:, c, :, :][full_mask[:, c, :, :] == 0] = 0.0 # Set land to 0
-                    normalized_data_tensor[:, c, :, :][full_mask[:, c, :, :] == 1] = 0.5 # Default if all valid values are the same
-            else: # No valid data in this channel
-                normalized_data_tensor[:, c, :, :] = 0.0 # Set entire channel to 0 if no valid data
-            # Ensure land points remain zero
-            normalized_data_tensor[:, c, :, :] *= full_mask[:, c, :, :]
-    else:
-        print("Performing global normalization across all channels...")
-        # Flatten and select only valid ocean points from all channels combined
-        valid_overall_data = raw_data_tensor[full_mask == 1]
-        if valid_overall_data.numel() > 0:
-            min_val = valid_overall_data.min()
-            max_val = valid_overall_data.max()
-            if (max_val - min_val) > 1e-6:
-                normalized_data_tensor[full_mask == 1] = (valid_overall_data - min_val) / (max_val - min_val)
-            else:
-                normalized_data_tensor[full_mask == 0] = 0.0 # Set land to 0
-                normalized_data_tensor[full_mask == 1] = 0.5
-        else: # No valid data
-            normalized_data_tensor[:] = 0.0 # Set entire tensor to 0
-        # Ensure land points remain zero
-        normalized_data_tensor *= full_mask
-
-    print(f"Normalized data shape: {normalized_data_tensor.shape}")
-    print(f"Land mask shape: {land_mask_tensor.shape}")
-    
-    day_of_year_tensor = torch.tensor(day_of_year_list, dtype=torch.long) # Day of year as long (categorical or integer)
-    # Repeat location_field_tensor for each sample in the batch
-    # location_field_tensor_batch = location_field_tensor.repeat(num_samples, 1, 1, 1)
-
-    return normalized_data_tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor

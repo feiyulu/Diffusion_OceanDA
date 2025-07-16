@@ -28,11 +28,12 @@ def train_diffusion_model(
     start_epoch=0,
     use_dayofyear_embedding=False,
     use_2d_location_embedding=False,
+    use_co2_embedding=False,
     save_interval=10,
     checkpoint_dir="checkpoints",
     test_id="default_test",
     channels=1,
-    loss_plot_dir="plots"
+    loss_plot_dir="loss_plots"
     ):
     """
     Trains the diffusion U-Net model and evaluates on a validation set.
@@ -48,6 +49,9 @@ def train_diffusion_model(
         land_mask (torch.Tensor): Global land/ocean mask (1, 1, H, W).
         gradient_accumulation_steps (int): Number of steps to accumulate gradients before optimizing.
         start_epoch (int): The epoch to start training from (useful for resuming).
+        use_dayofyear_embedding (bool): Whether day of year embedding is used.
+        use_2d_location_embedding (bool): Whether 2D location embedding is used.
+        use_co2_embedding (bool): Whether CO2 embedding is used.
         save_interval (int): How often (in epochs) to save a model checkpoint.
         checkpoint_dir (str): Directory where checkpoints will be saved.
         test_id (str): Identifier for the current test/run, used in checkpoint filenames.
@@ -75,7 +79,7 @@ def train_diffusion_model(
         # Zero gradients at the start of each accumulation cycle
         optimizer.zero_grad() 
 
-        for batch_idx, (x_0, dayofyear_batch, location_field_batch) in enumerate(pbar):
+        for batch_idx, (x_0, dayofyear_batch, location_field_batch, co2_batch) in enumerate(pbar):
             x_0 = x_0.to(device)
             current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1).to(device)
             
@@ -84,12 +88,13 @@ def train_diffusion_model(
             
             # Prepare optional embeddings for model input
             doy_input = dayofyear_batch.to(device) if use_dayofyear_embedding else None
-            # NEW: Pass 2D location field if enabled
-            loc_field_input = location_field_batch.to(device) if use_2d_location_embedding else None # NEW
+            loc_field_input = location_field_batch.to(device) if use_2d_location_embedding else None
+            co2_input = co2_batch.to(device) if use_co2_embedding else None
 
             predicted_epsilon = model(x_t, t, current_land_mask, 
                                       dayofyear_batch=doy_input, 
                                       location_field=loc_field_input,
+                                      co2_batch=co2_input,
                                       verbose_forward=print_unet_forward_shapes_train) 
 
             if print_unet_forward_shapes_train:
@@ -129,7 +134,7 @@ def train_diffusion_model(
         total_val_loss = 0
         with torch.no_grad(): # No gradients needed for validation
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} (Validation)")
-            for batch_idx, (x_0_val, dayofyear_batch_val, location_field_batch_val) in enumerate(val_pbar): 
+            for batch_idx, (x_0_val, dayofyear_batch_val, location_field_batch_val, co2_batch_val) in enumerate(val_pbar): 
                 x_0_val = x_0_val.to(device)
                 current_land_mask_val = land_mask.repeat(x_0_val.shape[0], 1, 1, 1).to(device)
                 
@@ -138,12 +143,13 @@ def train_diffusion_model(
                 
                 # Prepare optional embeddings for model input in validation
                 doy_input_val = dayofyear_batch_val.to(device) if use_dayofyear_embedding else None
-                # NEW: Pass 2D location field if enabled
-                loc_field_input_val = location_field_batch_val.to(device) if use_2d_location_embedding else None # NEW
+                loc_field_input_val = location_field_batch_val.to(device) if use_2d_location_embedding else None
+                co2_input_val = co2_batch_val.to(device) if use_co2_embedding else None
 
                 predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, 
                                               dayofyear_batch=doy_input_val, 
                                               location_field=loc_field_input_val,
+                                              co2_batch=co2_input_val,
                                               verbose_forward=False) # No verbose for val
 
                 val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val.float(),
@@ -194,7 +200,7 @@ def create_training_animation(data_tensor, land_mask, channels, use_salinity, sa
     frames = []
     land_mask_np = land_mask[0, 0].cpu().numpy()
     
-    num_cols = channels if use_salinity else 1
+    num_rows = channels if use_salinity else 1
     
     # Limit number of frames to avoid excessively large GIFs
     max_frames = 1000 
@@ -203,14 +209,14 @@ def create_training_animation(data_tensor, land_mask, channels, use_salinity, sa
     for i, sample in enumerate(tqdm(data_to_animate, desc="Generating animation frames")):
         sample_np = sample.cpu().numpy()
         
-        fig, axes = plt.subplots(1, num_cols, figsize=(7.5 * num_cols, 7))
-        if num_cols == 1: # If only one subplot, axes is not an array
+        fig, axes = plt.subplots(num_rows, 1, figsize=(12, 6*num_rows))
+        if num_rows == 1: # If only one subplot, axes is not an array
             axes = [axes]
 
         # Plot Temperature Map (always channel 0)
         masked_temp = np.ma.masked_where(land_mask_np == 0, sample_np[0])
         im_temp = axes[0].imshow(masked_temp, cmap='viridis', origin='lower', vmin=0., vmax=1.)
-        axes[0].set_title(f'Sample {i+1} - Temperature (Ocean Only)')
+        axes[0].set_title(f'Sample {i+1} - Temperature')
         axes[0].set_xlabel('X-coordinate')
         axes[0].set_ylabel('Y-coordinate')
         plt.colorbar(im_temp, ax=axes[0], label='Normalized Temperature')

@@ -49,6 +49,8 @@ class Config:
         co2_filepath=None,
         use_co2_embedding=False,
         co2_embedding_dim=64,
+        co2_varname='co2',
+        co2_range=[320,450],
 
         load_model_for_sampling=False,
         sampling_method='ddpm',
@@ -123,6 +125,8 @@ class Config:
         self.co2_filepath = co2_filepath
         self.use_co2_embedding = use_co2_embedding
         self.co2_embedding_dim = co2_embedding_dim
+        self.co2_varname = co2_varname
+        self.co2_range = co2_range
 
         self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method

@@ -273,6 +273,8 @@ class UNet(nn.Module):
                  dayofyear_embedding_dim=64,
                  use_dayofyear_embedding=False,
                  use_2d_location_embedding=False,
+                 use_co2_embedding=False,
+                 co2_embedding_dim=64,
                  location_embedding_channels=2,
                  channel_multipliers=(1, 2, 4, 8),
                  num_res_blocks=2, # Number of residual blocks per stage
@@ -285,6 +287,8 @@ class UNet(nn.Module):
         self.use_2d_location_embedding = use_2d_location_embedding
         self.dayofyear_embedding_dim = dayofyear_embedding_dim
         self.location_embedding_channels = location_embedding_channels
+        self.use_co2_embedding = use_co2_embedding
+        self.co2_embedding_dim = co2_embedding_dim
         self.channel_multipliers = channel_multipliers
         self.num_res_blocks = num_res_blocks
         self.attn_resolutions = attn_resolutions
@@ -294,6 +298,7 @@ class UNet(nn.Module):
         if verbose_init: print(f"  Time embedding dim: {time_embedding_dim}")
         if verbose_init: print(f"  Day of year embedding enabled: {use_dayofyear_embedding}, dim: {dayofyear_embedding_dim}")
         if verbose_init: print(f"  2D location embedding enabled: {use_2d_location_embedding}, channels: {location_embedding_channels}")
+        if verbose_init: print(f"  CO2 embedding enabled: {use_co2_embedding}, dim: {co2_embedding_dim}") # NEW
 
         # 1. Handle time embedding setup
         self.time_mlp = nn.Sequential(
@@ -311,10 +316,20 @@ class UNet(nn.Module):
                 nn.Linear(self.dayofyear_embedding_dim, self.dayofyear_embedding_dim)
             )
         
+        # CO2 embedding setup
+        if self.use_co2_embedding:
+            self.co2_mlp = nn.Sequential(
+                nn.Linear(1, self.co2_embedding_dim), # CO2 is a scalar value
+                nn.GELU(),
+                nn.Linear(self.co2_embedding_dim, self.co2_embedding_dim)
+            )
+
         # Calculate the total dimension for the condition embedding passed to blocks
         total_condition_embedding_dim = time_embedding_dim
         if self.use_dayofyear_embedding:
             total_condition_embedding_dim += self.dayofyear_embedding_dim
+        if self.use_co2_embedding:
+            total_condition_embedding_dim += self.co2_embedding_dim
         if verbose_init: print(f"  Total condition embedding dim for blocks: {total_condition_embedding_dim}")
 
         # 3. Initial convolution layer
@@ -382,17 +397,22 @@ class UNet(nn.Module):
         if verbose_init: print(f"  Final Output Conv: input {base_channels} -> output {out_channels}")
         if verbose_init: print("--- UNet Initialization Complete ---")
 
-    def forward(self, x, t, mask, dayofyear_batch=None, location_field=None, verbose_forward=False):
+    def forward(
+        self, x, t, mask, 
+        dayofyear_batch=None, location_field=None, co2_batch=None,
+        verbose_forward=False):
         # x: (N, C, H, W) - noisy input data (original channels only)
         # t: (N,) - Diffusion timestep
         # mask: (N, 1, H, W) - Land mask (1 for ocean, 0 for land)
         # dayofyear_batch: (N,) - Day of year for embedding
         # location_field: (N, location_embedding_channels, H, W) - 2D lat/lon embedding
+        # co2_batch: (N,) - CO2 concentration for embedding
 
         if verbose_forward: print("--- Starting UNet Forward Pass ---")
         if verbose_forward: print(f"Input X shape: {x.shape}, T shape: {t.shape}, Mask shape: {mask.shape}")
         if self.use_dayofyear_embedding and verbose_forward: print(f"Dayofyear batch shape: {dayofyear_batch.shape}")
         if self.use_2d_location_embedding and verbose_forward: print(f"Location field shape: {location_field.shape}")
+        if self.use_co2_embedding and verbose_forward: print(f"CO2 batch shape: {co2_batch.shape}")
 
         # Apply 2D location embedding if enabled, by concatenating channels
         current_x = x # Rename to avoid confusion with `x` used in internal blocks
@@ -420,8 +440,17 @@ class UNet(nn.Module):
             if verbose_forward: print(f"Day of year embedding (dayofyear_emb) shape: {dayofyear_emb.shape}")
             condition_emb = torch.cat((condition_emb, dayofyear_emb), dim=1)
             if verbose_forward: print(f"After dayofyear concat: Condition embedding (condition_emb) shape: {condition_emb.shape}")
-        else:
-            if verbose_forward: print(f"Condition embedding (condition_emb) shape: {condition_emb.shape}")
+        
+        # Combine with CO2 embedding if enabled
+        if self.use_co2_embedding and co2_batch is not None:
+            if co2_batch.dim() == 1:
+                co2_batch = co2_batch.unsqueeze(1).float()
+            else:
+                co2_batch = co2_batch.float()
+            co2_emb = self.co2_mlp(co2_batch)
+            if verbose_forward: print(f"CO2 embedding (co2_emb) shape: {co2_emb.shape}")
+            condition_emb = torch.cat((condition_emb, co2_emb), dim=1)
+            if verbose_forward: print(f"After CO2 concat: Condition embedding (condition_emb) shape: {condition_emb.shape}")
 
         # Initial convolution
         current_x, current_mask = self.initial_conv(current_x, current_mask)

@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, random_split # Import random_split
 
 # Import components from other files
 from config import Config # Already imported
-from data_utils import generate_synthetic_ocean_data, load_ocean_data # Already imported
+from data_utils import load_ocean_data # Already imported
 from unet_model import UNet, count_parameters # count_parameters imported for model size
 from diffusion_process import Diffusion # Already imported
 from training_utils import train_diffusion_model, plot_losses, create_training_animation
@@ -61,24 +61,20 @@ if __name__ == "__main__":
     print(f"Checkpoint save interval: {config.save_interval} epochs")
 
     # 1. Prepare Data
-    if config.real_data:
-        data, land_mask, day_of_year_data, co2_data, location_field_data, T_range, S_range = load_ocean_data(
-            config.filepath_t,
-            config.image_size, config.channels,
-            time_range=config.training_day_range,
-            time_interval=config.training_day_interval,
-            lat_range=config.lat_range,lon_range=config.lon_range,
-            use_salinity=config.use_salinity,
-            filepath_s=config.filepath_s,
-            variable_names=[config.varname_t, config.varname_s],
-            T_range=config.T_range,S_range=config.S_range,
-            co2_filepath=config.co2_filepath
-        )
-    else:
-        data, land_mask, day_of_year_data, location_field_data = generate_synthetic_ocean_data(
-            config.data_points, config.image_size, config.channels, 
-            config.use_salinity, config.channel_wise_normalization
-        )
+    data, land_mask, day_of_year_data, co2_data, location_field_data, T_range, S_range = load_ocean_data(
+        config.filepath_t,
+        config.image_size, config.channels,
+        time_range=config.training_day_range,
+        time_interval=config.training_day_interval,
+        lat_range=config.lat_range,lon_range=config.lon_range,
+        use_salinity=config.use_salinity,
+        filepath_s=config.filepath_s,
+        variable_names=[config.varname_t, config.varname_s],
+        T_range=config.T_range,S_range=config.S_range,
+        co2_filepath=config.co2_filepath,
+        co2_varname=config.co2_varname,   
+        co2_range=config.co2_range       
+    )
 
     print(f"Data size: {data.shape}")
     print(f"Land mask size: {land_mask.shape}")
@@ -88,10 +84,10 @@ if __name__ == "__main__":
 
     # Create a custom dataset that yields the additional embeddings
     class CustomOceanDataset(torch.utils.data.Dataset):
-        def __init__(self, data, dayofyear, location_field): 
+        def __init__(self, data, dayofyear, co2_data, location_field): 
             self.data = data
             self.dayofyear = dayofyear
-            self.co2 = co2
+            self.co2 = co2_data
             self.location_field = location_field
 
         def __len__(self):
@@ -99,7 +95,7 @@ if __name__ == "__main__":
 
         def __getitem__(self, idx):
             # Returns data, day_of_year, and location_field for the given index
-            return self.data[idx], self.dayofyear[idx], self.co2[idx], self.location_field.squeeze()
+            return self.data[idx], self.dayofyear[idx], self.location_field.squeeze(), self.co2[idx]
 
     # Initialize CustomOceanDataset with the loaded data
     full_dataset = CustomOceanDataset(data, day_of_year_data, co2_data, location_field_data) 
@@ -128,8 +124,10 @@ if __name__ == "__main__":
         use_dayofyear_embedding=config.use_dayofyear_embedding,
         dayofyear_embedding_dim=config.dayofyear_embedding_dim,
         use_2d_location_embedding=config.use_2d_location_embedding,
-        location_embedding_channels=config.location_embedding_channels
-        ).to(config.device) # Instantiate the U-Net model and move to device
+        location_embedding_channels=config.location_embedding_channels,
+        use_co2_embedding=config.use_co2_embedding,
+        co2_embedding_dim=config.co2_embedding_dim
+        ).to(config.device)
 
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     start_epoch = 0
@@ -189,6 +187,7 @@ if __name__ == "__main__":
             start_epoch=start_epoch, 
             use_dayofyear_embedding=config.use_dayofyear_embedding,
             use_2d_location_embedding=config.use_2d_location_embedding,
+            use_co2_embedding=config.use_co2_embedding,
             save_interval=config.save_interval, 
             checkpoint_dir=config.model_checkpoint_dir, 
             test_id=config.test_id,
@@ -212,8 +211,8 @@ if __name__ == "__main__":
 
     # Plot training and validation losses after training
     if train_losses and val_losses: # Only plot if training actually occurred and losses were collected
-        plot_filename = f"loss_plot_{test_id}_epoch_{config.epochs}.png"
-        specific_plot_path = os.path.join(config.plot_save_dir, plot_filename)
+        plot_filename = f"loss_plot_{config.test_id}_epoch_{config.epochs}.png"
+        specific_plot_path = os.path.join(config.loss_plot_dir, plot_filename)
         plot_losses(train_losses, val_losses, specific_plot_path)
 
     # 4. Prepare Sparse Observations for Conditional Sampling
@@ -222,30 +221,26 @@ if __name__ == "__main__":
     
     # Load new "true" samples to serve as the ground truth for observations
     for sample_day in config.sample_days:
-        if config.real_data:
-            true_sample, _, true_day_of_year_single, true_location_field_single, _, _ = load_ocean_data(
-                config.filepath_t_test,
-                config.image_size, config.channels,
-                time_range=[sample_day,sample_day+1,1],
-                lat_range=config.lat_range,lon_range=config.lon_range,
-                use_salinity=config.use_salinity,
-                filepath_s=config.filepath_s_test,
-                variable_names=[config.varname_t, config.varname_s],
-                T_range=config.T_range,S_range=config.S_range
-            )
-        else:
-            true_sample, _, true_day_of_year_single, true_location_field_single = generate_synthetic_ocean_data(
-                num_samples=1,
-                image_size=config.image_size,
-                channels=config.channels,
-                use_salinity=config.use_salinity,
-                channel_wise_normalization=config.channel_wise_normalization
-            )
+        true_sample, _, true_day_of_year_single, true_co2_single, true_location_field_single, _, _ = load_ocean_data(
+            config.filepath_t_test,
+            config.image_size, config.channels,
+            time_range=sample_day,
+            time_interval=1,
+            lat_range=config.lat_range,lon_range=config.lon_range,
+            use_salinity=config.use_salinity,
+            filepath_s=config.filepath_s_test,
+            variable_names=[config.varname_t, config.varname_s],
+            T_range=config.T_range,S_range=config.S_range,
+            co2_filepath=config.co2_filepath,
+            co2_varname=config.co2_varname,
+            co2_range=config.co2_range
+        )
         true_sample = true_sample.to(config.device)
 
         # Extract scalar day of year and the 2D location field
         target_doy = true_day_of_year_single.item() if true_day_of_year_single.numel() > 0 else None
         target_location_field_for_sampling = true_location_field_single[0:1, :, :, :].to(config.device)
+        target_co2_for_sampling = true_co2_single.item() if true_co2_single.numel() > 0 else None
 
         # Initialize observation tensors based on the shape of the true_sample
         observations_for_sampling = torch.zeros_like(true_sample)
@@ -286,6 +281,7 @@ if __name__ == "__main__":
                 observation_fidelity_weight=config.observation_fidelity_weight,
                 target_dayofyear=target_doy,
                 target_location_field=target_location_field_for_sampling,
+                target_co2_value=target_co2_for_sampling,
                 config=config # Pass the full config object
             )
 
@@ -299,6 +295,7 @@ if __name__ == "__main__":
                 dayofyear=sample_day).values-config.T_range[0])/\
                     (config.T_range[1]-config.T_range[0])
             print(f'Climatological Temperature Shape: {clim_t_pred.shape}')
+            clim_t_pred = clim_t_pred.squeeze()
             
             if config.use_salinity: 
                 ds_s_training = xr.open_mfdataset(config.filepath_s)
@@ -309,6 +306,7 @@ if __name__ == "__main__":
                     lon=slice(config.lon_range[0],config.lon_range[1]),
                     dayofyear=sample_day).values-config.S_range[0])/\
                         (config.S_range[1]-config.S_range[0])
+                clim_s_pred = clim_s_pred.squeeze()
 
             # 6. Visualize and Save Results
             print("\nVisualizing and saving results...")
@@ -398,7 +396,7 @@ if __name__ == "__main__":
                     plt.scatter(x, y, color='black', marker='o', s=1)
             
             plt.tight_layout()
-            plot_save_path_t = f"{config.sample_plot_dir}/ODA_obs{num_obs_points}_day{sample_day}_T.png"
+            plot_save_path_t = f"{config.sample_plot_dir}/ODA_obs{num_obs_points}_day{sample_day[0]}_T.png"
             plt.savefig(plot_save_path_t) # Save the plot to a file
             plt.show()
 
@@ -462,7 +460,7 @@ if __name__ == "__main__":
                 plt.ylabel('Y-coordinate')
 
                 plt.tight_layout()
-                plot_save_path_s = f"{config.sample_plot_dir}/ODA_obs{num_obs_points}_day{sample_day}_S.png"
+                plot_save_path_s = f"{config.sample_plot_dir}/ODA_obs{num_obs_points}_day{sample_day[0]}_S.png"
                 plt.savefig(config.plot_save_path_s) # Save the plot to a file
                 plt.show()
 
