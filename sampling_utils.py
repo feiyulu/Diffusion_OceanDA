@@ -10,20 +10,11 @@ from diffusion_process import Diffusion # For the diffusion process logic
 # --- Conditional Sampling Function ---
 @torch.no_grad() # Disable gradient calculations for inference (sampling)
 def sample_conditional(
-    model, 
-    diffusion, 
-    num_samples, 
-    observations, 
-    observed_mask, 
-    land_mask, 
-    channels, 
-    image_size, 
-    device, 
-    sampling_method='ddpm', 
+    model, diffusion, num_samples, observations, observed_mask, land_mask, 
+    channels, image_size, device, sampling_method='ddpm', 
     observation_fidelity_weight=1.0,
-    target_dayofyear=None, 
+    target_conditions=None, 
     target_location_field=None, 
-    target_co2_value=None,
     config=None):
     """
     Generates new ocean states conditionally guided by sparse observations and a land mask.
@@ -40,10 +31,10 @@ def sample_conditional(
         device (torch.device): Device to perform computations on.
         sampling_method (str): 'ddpm' for DDPM sampling, 'ddim' for DDIM sampling.
         observation_fidelity_weight (float): Weight for observations (0.0=ignore, 1.0=hard).
-        target_dayofyear (int, optional): Day of year for conditional sampling.
-        target_location_field (torch.Tensor, optional): 2D location field for conditional sampling (1, 2, H, W).
-        target_co2_value (float, optional): CO2 concentration value for conditional sampling.
-        config (Config): The configuration object, used to access embedding flags.
+        target_conditions (dict, optional): Dictionary of scalar conditions for sampling, 
+                                            e.g., {'dayofyear': 150, 'co2': 400}.
+        target_location_field (torch.Tensor, optional): 2D location field.
+        config (Config): The configuration object.
 
     Returns:
         torch.Tensor: Generated ocean states (num_samples, channels, H, W).
@@ -66,43 +57,35 @@ def sample_conditional(
     observed_mask_tensor = observed_mask.to(device)
 
     # Prepare conditional embedding inputs
-    doy_input = None
-    if config.use_dayofyear_embedding and target_dayofyear is not None:
-        doy_input = torch.full((num_samples,), target_dayofyear, device=device, dtype=torch.long)
+    conditions_input = None
+    if target_conditions and config.conditioning_configs:
+        conditions_input = {}
+        for key, val_tensor in target_conditions.items():
+            # Ensure value is a scalar, then create a batch of it
+            scalar_val = val_tensor.item()
+            conditions_input[key] = torch.full((num_samples,), scalar_val, device=device)
     
     loc_field_input = None
     if config.use_2d_location_embedding and target_location_field is not None:
         # target_location_field is already (1, 2, H, W), repeat for num_samples
         loc_field_input = target_location_field.repeat(num_samples, 1, 1, 1).to(device)
 
-    co2_input = None
-    if config.use_co2_embedding and target_co2_value is not None:
-        # target_co2_value is a scalar, create a tensor of shape (num_samples,)
-        co2_input = torch.full((num_samples,), target_co2_value, device=device, dtype=torch.float32)
-
-    # Prepare timesteps for DDIM, if used. For DDPM, iterate `reversed(range(0, config.timesteps))`.
-    if sampling_method == 'ddim':
-        timesteps_to_sample = list(reversed(range(0, diffusion.timesteps)))
-    else: # 'ddpm'
-        timesteps_to_sample = list(reversed(range(0, diffusion.timesteps)))
+    timesteps_to_sample = list(reversed(range(0, diffusion.timesteps)))
 
     # Flag to control verbose printing in UNet.forward for the first sampling iteration
     print_unet_forward_shapes_sample = True 
 
     # Iterate backward through the diffusion timesteps (denoising process)
-    for i_idx, i in enumerate(tqdm(timesteps_to_sample, desc="Sampling")):
+    for i in tqdm(timesteps_to_sample, desc="Sampling"):
         t = torch.full((num_samples,), i, device=device, dtype=torch.long) # Current timestep
 
         # Predict the noise for the current noisy image x_t, passing all conditioning inputs
         predicted_noise = model(x_t, t, current_land_mask_batch, 
-                                dayofyear_batch=doy_input, 
+                                conditions=conditions_input, 
                                 location_field=loc_field_input,
-                                co2_batch=co2_input,
                                 verbose_forward=print_unet_forward_shapes_sample)
-
-        # After the first forward pass, set the flag to False to suppress further verbose printing
-        if print_unet_forward_shapes_sample:
-            print_unet_forward_shapes_sample = False
+                                
+        if print_unet_forward_shapes_sample: print_unet_forward_shapes_sample = False
 
         # Estimate the clean image (x_0_pred) from x_t and the predicted noise
         x_0_pred = diffusion.predict_x0_from_noise(x_t, t, predicted_noise, current_land_mask_batch)

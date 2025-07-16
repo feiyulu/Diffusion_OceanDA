@@ -27,14 +27,15 @@
     "save_model_after_training": true,
     "save_interval": 10,
 
-    "use_dayofyear_embedding": true,
-    "dayofyear_embedding_dim": 64,
+    "conditioning_configs": {
+        "dayofyear": {"dim": 64},
+        "co2": {"dim": 64}
+    },
+
     "use_2d_location_embedding": true,
     "location_embedding_channels": 2,
 
     "co2_filepath": "/scratch/cimes/feiyul/Ocean_Data/obs_data/co2_daily.nc",
-    "use_co2_embedding": true,
-    "co2_embedding_dim": 64,
     "co2_varname": "co2",
     "co2_range": [320,450], 
 

@@ -41,16 +41,16 @@ class Config:
         save_model_after_training=True,
         save_interval=10,
 
-        use_dayofyear_embedding=False,
-        dayofyear_embedding_dim=64,
-        use_2d_location_embedding=False,
-        location_embedding_channels=2,
-    
+        conditioning_configs={
+            "dayofyear": {"dim": 64},
+            "co2": {"dim": 64}
+        },
         co2_filepath=None,
-        use_co2_embedding=False,
-        co2_embedding_dim=64,
         co2_varname='co2',
         co2_range=[320,450],
+
+        use_2d_location_embedding=False,
+        location_embedding_channels=2,
 
         load_model_for_sampling=False,
         sampling_method='ddpm',
@@ -117,17 +117,15 @@ class Config:
         self.save_model_after_training = save_model_after_training
         self.save_interval = save_interval
 
-        self.use_dayofyear_embedding = use_dayofyear_embedding
-        self.dayofyear_embedding_dim = dayofyear_embedding_dim
-        self.use_2d_location_embedding = use_2d_location_embedding    
-        self.location_embedding_channels = location_embedding_channels
-        
+        self.conditioning_configs = conditioning_configs
+       
         self.co2_filepath = co2_filepath
-        self.use_co2_embedding = use_co2_embedding
-        self.co2_embedding_dim = co2_embedding_dim
         self.co2_varname = co2_varname
         self.co2_range = co2_range
 
+        self.use_2d_location_embedding = use_2d_location_embedding    
+        self.location_embedding_channels = location_embedding_channels
+ 
         self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method
         self.observation_fidelity_weight = observation_fidelity_weight

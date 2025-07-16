@@ -54,51 +54,48 @@ if __name__ == "__main__":
     print(f"Sampling method: {config.sampling_method.upper()}")
     print(f"Observation fidelity weight: {config.observation_fidelity_weight}")
     print(f"Generate training animation: {config.generate_training_animation}")
-    print(f"Using day of year embedding: {config.use_dayofyear_embedding} (dim: {config.dayofyear_embedding_dim})")
-    print(f"Using CO2 embedding: {config.use_co2_embedding} (dim: {config.co2_embedding_dim})")
+    print(f"Generalized conditioning configs: {config.conditioning_configs}")
     print(f"Using 2D location embedding: {config.use_2d_location_embedding} (channels: {config.location_embedding_channels})")
     print(f"Gradient Accumulation Steps: {config.gradient_accumulation_steps}")
     print(f"Checkpoint save interval: {config.save_interval} epochs")
 
     # 1. Prepare Data
-    data, land_mask, day_of_year_data, co2_data, location_field_data, T_range, S_range = load_ocean_data(
-        config.filepath_t,
-        config.image_size, config.channels,
-        time_range=config.training_day_range,
-        time_interval=config.training_day_interval,
-        lat_range=config.lat_range,lon_range=config.lon_range,
-        use_salinity=config.use_salinity,
-        filepath_s=config.filepath_s,
+    data, land_mask, conditional_data, location_field_data, T_range, S_range = load_ocean_data(
+        config.filepath_t, config.image_size, config.channels,
+        time_range=config.training_day_range, time_interval=config.training_day_interval,
+        lat_range=config.lat_range, lon_range=config.lon_range,
+        use_salinity=config.use_salinity, filepath_s=config.filepath_s,
         variable_names=[config.varname_t, config.varname_s],
-        T_range=config.T_range,S_range=config.S_range,
-        co2_filepath=config.co2_filepath,
-        co2_varname=config.co2_varname,   
-        co2_range=config.co2_range       
+        T_range=config.T_range, S_range=config.S_range,
+        co2_filepath=config.co2_filepath, co2_varname=config.co2_varname, co2_range=config.co2_range,
+        conditioning_configs=config.conditioning_configs # Pass configs to data loader
     )
 
     print(f"Data size: {data.shape}")
     print(f"Land mask size: {land_mask.shape}")
-    if config.use_dayofyear_embedding: print(f"Day of Year data size: {day_of_year_data.shape}")
-    if config.use_co2_embedding: print(f"CO2 data size: {co2_data.shape}")
+    if config.conditioning_configs:
+        for key in config.conditioning_configs:
+            print(f"{key} data size: {conditional_data[key].shape}")
     if config.use_2d_location_embedding: print(f"2D Location Field data size: {location_field_data.shape}")
 
     # Create a custom dataset that yields the additional embeddings
     class CustomOceanDataset(torch.utils.data.Dataset):
-        def __init__(self, data, dayofyear, co2_data, location_field): 
+        def __init__(self, data, conditional_data, location_field): 
             self.data = data
-            self.dayofyear = dayofyear
-            self.co2 = co2_data
+            self.conditional_data = conditional_data # This is a dict, e.g., {'dayofyear': tensor, 'co2': tensor}
             self.location_field = location_field
 
         def __len__(self):
             return len(self.data)
 
         def __getitem__(self, idx):
-            # Returns data, day_of_year, and location_field for the given index
-            return self.data[idx], self.dayofyear[idx], self.location_field.squeeze(), self.co2[idx]
+            # For each item, create a dictionary of the conditional values at that index
+            conditions_at_idx = {key: val[idx] for key, val in self.conditional_data.items()}
+            # Location field is static, so we just return it (squeezed to remove time dim)
+            return self.data[idx], conditions_at_idx, self.location_field.squeeze(0)
 
     # Initialize CustomOceanDataset with the loaded data
-    full_dataset = CustomOceanDataset(data, day_of_year_data, co2_data, location_field_data) 
+    full_dataset = CustomOceanDataset(data, conditional_data, location_field_data)
 
     # Split dataset into training and validation sets
     val_size = int(config.validation_split * len(full_dataset))
@@ -121,13 +118,10 @@ if __name__ == "__main__":
         in_channels=config.channels, 
         out_channels=config.channels, 
         base_channels=config.base_unet_channels,
-        use_dayofyear_embedding=config.use_dayofyear_embedding,
-        dayofyear_embedding_dim=config.dayofyear_embedding_dim,
+        conditioning_configs=config.conditioning_configs,
         use_2d_location_embedding=config.use_2d_location_embedding,
-        location_embedding_channels=config.location_embedding_channels,
-        use_co2_embedding=config.use_co2_embedding,
-        co2_embedding_dim=config.co2_embedding_dim
-        ).to(config.device)
+        location_embedding_channels=config.location_embedding_channels
+    ).to(config.device)
 
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     start_epoch = 0
@@ -185,9 +179,6 @@ if __name__ == "__main__":
             config.epochs, config.device, land_mask, 
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             start_epoch=start_epoch, 
-            use_dayofyear_embedding=config.use_dayofyear_embedding,
-            use_2d_location_embedding=config.use_2d_location_embedding,
-            use_co2_embedding=config.use_co2_embedding,
             save_interval=config.save_interval, 
             checkpoint_dir=config.model_checkpoint_dir, 
             test_id=config.test_id,
@@ -221,7 +212,7 @@ if __name__ == "__main__":
     
     # Load new "true" samples to serve as the ground truth for observations
     for sample_day in config.sample_days:
-        true_sample, _, true_day_of_year_single, true_co2_single, true_location_field_single, _, _ = load_ocean_data(
+        true_sample, _, true_conditions_dict, true_location_field_single, _, _ = load_ocean_data(
             config.filepath_t_test,
             config.image_size, config.channels,
             time_range=sample_day,
@@ -231,16 +222,15 @@ if __name__ == "__main__":
             filepath_s=config.filepath_s_test,
             variable_names=[config.varname_t, config.varname_s],
             T_range=config.T_range,S_range=config.S_range,
+            conditioning_configs=config.conditioning_configs,
             co2_filepath=config.co2_filepath,
             co2_varname=config.co2_varname,
             co2_range=config.co2_range
         )
         true_sample = true_sample.to(config.device)
 
-        # Extract scalar day of year and the 2D location field
-        target_doy = true_day_of_year_single.item() if true_day_of_year_single.numel() > 0 else None
+        # Extract the 2D location field
         target_location_field_for_sampling = true_location_field_single[0:1, :, :, :].to(config.device)
-        target_co2_for_sampling = true_co2_single.item() if true_co2_single.numel() > 0 else None
 
         # Initialize observation tensors based on the shape of the true_sample
         observations_for_sampling = torch.zeros_like(true_sample)
@@ -268,21 +258,14 @@ if __name__ == "__main__":
 
             # 5. Perform Conditional Sampling
             generated_samples = sample_conditional(
-                model,
-                diffusion,
-                num_samples=1,
-                observations=observations_for_sampling,
-                observed_mask=observed_mask_for_sampling,
-                land_mask=land_mask,
-                channels=config.channels,
-                image_size=config.image_size,
-                device=config.device,
-                sampling_method=config.sampling_method,
+                model, diffusion, num_samples=1,
+                observations=observations_for_sampling, observed_mask=observed_mask_for_sampling,
+                land_mask=land_mask, channels=config.channels, image_size=config.image_size,
+                device=config.device, sampling_method=config.sampling_method,
                 observation_fidelity_weight=config.observation_fidelity_weight,
-                target_dayofyear=target_doy,
+                target_conditions=true_conditions_dict, # Pass the dictionary of conditions
                 target_location_field=target_location_field_for_sampling,
-                target_co2_value=target_co2_for_sampling,
-                config=config # Pass the full config object
+                config=config
             )
 
             # Get climatological prediction as baseline skills

@@ -16,112 +16,55 @@ from diffusion_process import Diffusion # Already imported
 
 # --- Training Function ---
 def train_diffusion_model(
-    model, 
-    train_loader, 
-    val_loader, 
-    diffusion, 
-    optimizer, 
-    epochs, 
-    device, 
-    land_mask, 
-    gradient_accumulation_steps=1,
+    model, train_loader, val_loader, diffusion, optimizer, 
+    epochs, device, land_mask, gradient_accumulation_steps=1,
     start_epoch=0,
-    use_dayofyear_embedding=False,
-    use_2d_location_embedding=False,
-    use_co2_embedding=False,
-    save_interval=10,
-    checkpoint_dir="checkpoints",
-    test_id="default_test",
-    channels=1,
-    loss_plot_dir="loss_plots"
+    # NEW: use_... flags are no longer needed here, the model knows from its config
+    save_interval=10, checkpoint_dir="checkpoints",
+    test_id="default_test", channels=1, loss_plot_dir="loss_plots"
     ):
-    """
-    Trains the diffusion U-Net model and evaluates on a validation set.
-
-    Args:
-        model (nn.Module): The U-Net model to train.
-        train_loader (torch.utils.data.DataLoader): DataLoader for training data.
-        val_loader (torch.utils.data.DataLoader): DataLoader for validation data.
-        diffusion (Diffusion): Diffusion process utility object.
-        optimizer (torch.optim.Optimizer): Optimizer for model parameters.
-        epochs (int): Number of training epochs.
-        device (torch.device): Device to perform computations on (CPU/CUDA).
-        land_mask (torch.Tensor): Global land/ocean mask (1, 1, H, W).
-        gradient_accumulation_steps (int): Number of steps to accumulate gradients before optimizing.
-        start_epoch (int): The epoch to start training from (useful for resuming).
-        use_dayofyear_embedding (bool): Whether day of year embedding is used.
-        use_2d_location_embedding (bool): Whether 2D location embedding is used.
-        use_co2_embedding (bool): Whether CO2 embedding is used.
-        save_interval (int): How often (in epochs) to save a model checkpoint.
-        checkpoint_dir (str): Directory where checkpoints will be saved.
-        test_id (str): Identifier for the current test/run, used in checkpoint filenames.
-        channels (int): Number of channels, used in checkpoint filenames.
-    
-    Returns:
-        tuple: (list, list) - lists of training losses and validation losses per epoch.
-    """
-    model.train() # Set model to training mode
+    """ Trains the diffusion U-Net model. """
+    model.train()
     print("Starting training...")
-    
-    train_losses = []
-    val_losses = []
-
-    # Flag to control verbose printing in UNet.forward for the first iteration
+    train_losses, val_losses = [], []
     print_unet_forward_shapes_train = True 
-
     land_mask = land_mask.to(device)
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    for epoch in range(start_epoch, epochs): # Start from `start_epoch`
+    for epoch in range(start_epoch, epochs):
         total_train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} (Training)")
-
-        # Zero gradients at the start of each accumulation cycle
         optimizer.zero_grad() 
 
-        for batch_idx, (x_0, dayofyear_batch, location_field_batch, co2_batch) in enumerate(pbar):
+        # NEW: The data loader now yields a dictionary of conditions
+        for batch_idx, (x_0, conditions_batch, location_field_batch) in enumerate(pbar):
             x_0 = x_0.to(device)
-            current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1).to(device)
-            
+            current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1)
             t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=device).long()
             x_t, true_epsilon = diffusion.noise_images(x_0, t, current_land_mask)
             
-            # Prepare optional embeddings for model input
-            doy_input = dayofyear_batch.to(device) if use_dayofyear_embedding else None
-            loc_field_input = location_field_batch.to(device) if use_2d_location_embedding else None
-            co2_input = co2_batch.to(device) if use_co2_embedding else None
+            # NEW: Move each tensor in the conditions dictionary to the device
+            conditions_input = {k: v.to(device) for k, v in conditions_batch.items()}
+            loc_field_input = location_field_batch.to(device)
 
+            # Pass the dictionaries directly to the model
             predicted_epsilon = model(x_t, t, current_land_mask, 
-                                      dayofyear_batch=doy_input, 
+                                      conditions=conditions_input, 
                                       location_field=loc_field_input,
-                                      co2_batch=co2_input,
                                       verbose_forward=print_unet_forward_shapes_train) 
+            if print_unet_forward_shapes_train: print_unet_forward_shapes_train = False
 
-            if print_unet_forward_shapes_train:
-                print_unet_forward_shapes_train = False
-
-            # Calculate loss (MSE between true noise and predicted noise)
-            # Scale loss by gradient_accumulation_steps
-            loss = F.mse_loss(predicted_epsilon * current_land_mask.float(),
-                              true_epsilon * current_land_mask.float()) / gradient_accumulation_steps
-
+            loss = F.mse_loss(predicted_epsilon * current_land_mask, true_epsilon * current_land_mask) / gradient_accumulation_steps
             loss.backward()
 
-            # Perform optimizer step and zero gradients only after accumulation steps
             if (batch_idx + 1) % gradient_accumulation_steps == 0:
-                # Gradient clipping (optional, but good practice for diffusion models)
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-                optimizer.zero_grad() # Zero gradients after optimization
+                optimizer.zero_grad()
 
-            total_train_loss += loss.item() * gradient_accumulation_steps # Unscale loss for reporting
+            total_train_loss += loss.item() * gradient_accumulation_steps
+            pbar.set_postfix(loss=loss.item() * gradient_accumulation_steps)
 
-            pbar.set_postfix(loss=loss.item() * gradient_accumulation_steps) # Unscale for display
-
-        # Ensure any remaining accumulated gradients are applied at the end of the epoch
-        # This handles cases where the total number of batches is not a multiple of gradient_accumulation_steps
-        if (batch_idx + 1) % gradient_accumulation_steps != 0:
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if (len(train_loader)) % gradient_accumulation_steps != 0:
             optimizer.step()
             optimizer.zero_grad()
 
@@ -129,38 +72,31 @@ def train_diffusion_model(
         train_losses.append(avg_train_loss)
         print(f"Epoch {epoch+1} finished, Average Training Loss: {avg_train_loss:.4f}")
 
-        # --- Validation Loop ---
-        model.eval() # Set model to evaluation mode
+        # --- Validation Loop (also updated) ---
+        model.eval()
         total_val_loss = 0
-        with torch.no_grad(): # No gradients needed for validation
+        with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} (Validation)")
-            for batch_idx, (x_0_val, dayofyear_batch_val, location_field_batch_val, co2_batch_val) in enumerate(val_pbar): 
+            for x_0_val, conditions_batch_val, location_field_batch_val in val_pbar:
                 x_0_val = x_0_val.to(device)
-                current_land_mask_val = land_mask.repeat(x_0_val.shape[0], 1, 1, 1).to(device)
-                
+                current_land_mask_val = land_mask.repeat(x_0_val.shape[0], 1, 1, 1)
                 t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=device).long()
                 x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, current_land_mask_val)
                 
-                # Prepare optional embeddings for model input in validation
-                doy_input_val = dayofyear_batch_val.to(device) if use_dayofyear_embedding else None
-                loc_field_input_val = location_field_batch_val.to(device) if use_2d_location_embedding else None
-                co2_input_val = co2_batch_val.to(device) if use_co2_embedding else None
+                conditions_input_val = {k: v.to(device) for k, v in conditions_batch_val.items()}
+                loc_field_input_val = location_field_batch_val.to(device)
 
                 predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, 
-                                              dayofyear_batch=doy_input_val, 
-                                              location_field=loc_field_input_val,
-                                              co2_batch=co2_input_val,
-                                              verbose_forward=False) # No verbose for val
-
-                val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val.float(),
-                                      true_epsilon_val * current_land_mask_val.float())
+                                              conditions=conditions_input_val, 
+                                              location_field=loc_field_input_val)
+                val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val, true_epsilon_val * current_land_mask_val)
                 total_val_loss += val_loss.item()
                 val_pbar.set_postfix(val_loss=val_loss.item())
 
         avg_val_loss = total_val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
         print(f"Epoch {epoch+1} finished, Average Validation Loss: {avg_val_loss:.4f}")
-        model.train() # Set model back to training mode for next epoch
+        model.train()
 
         # Save checkpoint periodically
         if (epoch + 1) % save_interval == 0:

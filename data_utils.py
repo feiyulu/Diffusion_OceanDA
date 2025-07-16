@@ -22,7 +22,8 @@ def load_ocean_data(
     S_range=None,
     co2_filepath=None,
     co2_varname="co2",
-    co2_range=[320,450]):
+    co2_range=[320,450],
+    conditioning_configs=None): 
     """
     Loads ocean data from xarray/NetCDF files for temperature and optionally salinity,
     applies spatial and temporal slicing, combines into channels, and normalizes.
@@ -40,16 +41,16 @@ def load_ocean_data(
         filepath_mask (list or str, optional): Path to the land mask file
         filepath_s (list or str, optional): Path(s) to the data file(s) for salinity. Required if channels is 2.
         variable_names (list): List of variable names to load as channels, e.g., ['sst', 'sss'].
-        min_val_in (list, optional): List of minimum values for normalization for each channel [min_temp, min_sal].
-        max_val_in (list, optional): List of maximum values for normalization for each channel [max_temp, max_sal].
-        co2_filepath:
-        co2_varname:
-        co2_range:
+        T_range (list, optional): List of minimum values for normalization for temperature.
+        S_range (list, optional): List of maximum values for normalization for salinity.
+        co2_filepath (str, optional): Path to CO2 data file.
+        co2_varname (str): Variable name for CO2 in the file.
+        co2_range (list): Min/max values for CO2 normalization.
+        conditioning_configs (dict): Dictionary from config specifying which conditioners to load.
 
     Returns:
-        tuple: (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list, list) -
-               data tensor, land_mask_tensor, day_of_year_tensor, location_field_tensor, actual min_vals, actual max_vals. 
-               location_field_tensor
+        tuple: (torch.Tensor, torch.Tensor, dict, torch.Tensor, list, list) -
+               data_tensor, land_mask_tensor, conditional_data_dict, location_field_tensor, actual_T_range, actual_S_range.
                The mask identifies where data is valid (1) vs. NaN/land (0).
     """
     img_h, img_w = image_size
@@ -58,140 +59,90 @@ def load_ocean_data(
     data_vars = []
     actual_T_range = []
     actual_S_range = []
-    day_of_year_list = []
-    co2_daily_list = []
+    conditional_data = {}
     location_field_list = []
 
-    def _load_and_process_data(
-        filepaths, varname, 
-        filepath_mask=None, mask_varname=None, 
-        min_val_in=None, max_val_in=None):
-
+    # This inner function is a refactoring of the original loading logic
+    def _load_and_process_variable(filepaths, varname, mask_static, min_val_in=None, max_val_in=None):
         ds = xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True)
         da = ds[varname]
 
-        # Slice time, lat, lon
         if len(time_range)==2:
-            da_sliced = da.sel(
-                time=slice(time_range[0], time_range[1], time_interval)).isel(
-                    lat=slice(lat_range[0], lat_range[1]),
-                    lon=slice(lon_range[0], lon_range[1]))
+            da_sliced = da.sel(time=slice(time_range[0], time_range[1],time_interval)).isel(
+                lat=slice(lat_range[0], lat_range[1]), lon=slice(lon_range[0], lon_range[1]))
         elif len(time_range)==1:
             da_sliced = da.isel(time=time_range).isel(
-                lat=slice(lat_range[0], lat_range[1]),lon=slice(lon_range[0], lon_range[1]))
-
-        # Get actual lat/lon values for the sliced range
-        actual_lats = da.lat.isel(lat=slice(lat_range[0], lat_range[1])).values
-        actual_lons = da.lon.isel(lon=slice(lon_range[0], lon_range[1])).values
+                lat=slice(lat_range[0], lat_range[1]), lon=slice(lon_range[0], lon_range[1]))
         
-        # NEW: Create 2D latitude and longitude fields
-        lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons, indexing='ij')
-        
-        # Normalize lat/lon grids to [-1, 1] for stable input to model
-        normalized_lat_grid = (lat_grid - (-90)) / (90 - (-90)) * 2 - 1
-        normalized_lon_grid = (lon_grid - (0)) / (360 - (0)) * 2 - 1
-        
-        # Stack into a (2, H, W) tensor
-        location_field_single_sample = np.stack([normalized_lat_grid, normalized_lon_grid], axis=0).astype(np.float32)
-        location_field_list.append(location_field_single_sample)
-
-        for t_idx in range(da_sliced.sizes['time']):
-            doy = da_sliced.isel(time=t_idx).time.dt.dayofyear.item()
-            day_of_year_list.append(doy)
-            # location_field_list.append(location_field_single_sample)
-
-        # Convert to numpy and handle NaNs for masking
         data_np = da_sliced.values.astype(np.float32)
+        mask_var = mask_static if mask_static is not None else ~np.isnan(data_np).all(axis=0)
+        data_np[np.isnan(data_np)] = 0.0
+
+        min_val, max_val = (min_val_in, max_val_in) if min_val_in and max_val_in else (data_np.min(), data_np.max())
         
-        # Load land mask or calculate land mask based on NaNs in this specific variable
-        if filepath_mask and mask_var:
-            mask_ds = xr.open_dataset(filepath_mask)
-            mask_static = mask_ds[mask_varname].isel(
-                lat=slice(lat_range[0], lat_range[1]),
-                lon=slice(lon_range[0], lon_range[1])).values
-            mask_var = mask_static.unsqueeze(0).repeat(data_np.shape[0],1,1)
-        else:
-            mask_var = ~np.isnan(data_np).all(axis=0)
-            mask_var = mask_var.astype(np.float32)
-
-        data_np[np.isnan(data_np)] = 0.0 
-
-        if min_val_in and max_val_in:
-            min_val = min_val_in
-            max_val = max_val_in
-        else:
-            min_val = data_np.min()
-            max_val = data_np.max()
-
-        normalized_data_np = np.zeros_like(data_np)
-        if (max_val - min_val) > 1e-6:
-            normalized_data_np = (data_np - min_val) / (max_val - min_val)
-        else:
-            normalized_data_np = np.full_like(data_np, 0.5)
-
+        normalized_data_np = (data_np - min_val) / (max_val - min_val) if (max_val - min_val) > 1e-6 else np.full_like(data_np, 0.5)
         normalized_data_np *= mask_var[None, :, :]
 
-        return normalized_data_np, mask_var, min_val, max_val
+        return normalized_data_np, mask_var, [min_val, max_val], da_sliced.time
+
+    # --- Main Loading Logic ---
+    # Load a static mask first if available
+    mask_ds = xr.open_dataset(filepath_mask) if filepath_mask else None
+    static_mask_np = mask_ds[mask_varname].isel(lat=slice(lat_range[0], lat_range[1]), lon=slice(lon_range[0], lon_range[1])).values if mask_ds else None
 
     # Load Temperature Data
-    if T_range:
-        temp_np, land_mask_temp, min_t, max_t = _load_and_process_data(
-            filepath_t, variable_names[0], filepath_mask, mask_varname,
-            T_range[0], T_range[1])
-    else:
-        temp_np, land_mask_temp, min_t, max_t = _load_and_process_data(
-            filepath_t, variable_names[0], filepath_mask, mask_varname)
-
+    temp_np, land_mask_temp, actual_T_range, time_coords = _load_and_process_variable(
+        filepath_t, variable_names[0], static_mask_np, T_range[0] if T_range else None, T_range[1] if T_range else None
+    )
     data_vars.append(temp_np)
-    actual_T_range.append(min_t)
-    actual_T_range.append(max_t)
 
     # Load Salinity Data if required
     land_mask_sal = land_mask_temp
-    if channels == 2 and filepath_s is not None and len(variable_names) > 1:
-        if min_val_in and max_val_in:
-            sal_np, land_mask_sal, min_s, max_s = _load_and_process_data(
-                filepath_s, variable_names[1], filepath_mask, mask_varname,
-                min_val_in[1], max_val_in[1])
-        else:
-            sal_np, land_mask_sal, min_s, max_s = _load_and_process_data(
-                filepath_s, variable_names[1], filepath_mask, mask_varname,)
+    if use_salinity:
+        sal_np, land_mask_sal, actual_S_range, _ = _load_and_process_variable(
+            filepath_s, variable_names[1], static_mask_np, S_range[0] if S_range else None, S_range[1] if S_range else None
+        )
         data_vars.append(sal_np)
-        actual_S_range.append(min_s)
-        actual_S_range.append(max_s)
-        
-    elif channels == 2 and (filepath_s is None or len(variable_names) <= 1):
-        print("Warning: Configured for 2 channels (Temp+Salinity) but salinity file or varname is missing. Proceeding with 1 channel (Temperature only).")
-        channels = 1
 
-    co2_ds = xr.open_dataset(co2_filepath)
-    co2_da = co2_ds[co2_varname]
-    if len(time_range)==2:
-        co2_sliced = co2_da.sel(time=slice(time_range[0], time_range[1], time_interval))
-    elif len(time_range)==1:
-        co2_sliced = co2_da.isel(time=time_range)
+    # --- Load Conditional Data based on config ---
+    if conditioning_configs and 'dayofyear' in conditioning_configs:
+        day_of_year_list = [t.dt.dayofyear.item() for t in time_coords]
+        conditional_data['dayofyear'] = torch.tensor(day_of_year_list, dtype=torch.long)
+        print(f"Loaded 'dayofyear' conditional data, shape: {conditional_data['dayofyear'].shape}")
         
-    co2_normalized = (co2_sliced-co2_range[0])/(co2_range[1]-co2_range[0])
+    if conditioning_configs and 'co2' in conditioning_configs and co2_filepath:
+        co2_ds = xr.open_dataset(co2_filepath)
+        if len(time_range)==2:
+            co2_da = co2_ds[co2_varname].sel(time=slice(time_range[0], time_range[1],time_interval))
+        elif len(time_range)==1:
+            co2_da = co2_ds[co2_varname].isel(time=time_range)
+        co2_normalized = (co2_da.values - co2_range[0]) / (co2_range[1] - co2_range[0])
+        conditional_data['co2'] = torch.tensor(co2_normalized, dtype=torch.float32)
+        print(f"Loaded 'co2' conditional data, shape: {conditional_data['co2'].shape}")
+
+    # --- Load Spatial/Location Embedding ---
+    ds_ref = xr.open_mfdataset(filepath_t, combine='by_coords')
+    actual_lats = ds_ref.lat.isel(lat=slice(lat_range[0], lat_range[1])).values
+    actual_lons = ds_ref.lon.isel(lon=slice(lon_range[0], lon_range[1])).values
+    lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons, indexing='ij')
+    normalized_lat_grid = (lat_grid - (-90)) / (90 - (-90)) * 2 - 1
+    normalized_lon_grid = (lon_grid - 0) / (360 - 0) * 2 - 1
+    location_field_single_sample = np.stack([normalized_lat_grid, normalized_lon_grid], axis=0).astype(np.float32)
+    # The location field is static for all time steps in this dataset
+    location_field_tensor = torch.tensor(location_field_single_sample, dtype=torch.float32).unsqueeze(0)
+    print(f"Location embedding data shape: {location_field_tensor.shape}")
+
+    # --- Finalize and Return ---
     data_tensor = torch.tensor(np.stack(data_vars, axis=1), dtype=torch.float32)
-
     combined_land_mask_np = (land_mask_temp * land_mask_sal).astype(np.float32)
     land_mask_tensor = torch.tensor(combined_land_mask_np[None, None, :, :], dtype=torch.float32)
-
+    
+    # Ensure data is zeroed out on land
     full_mask_expanded = land_mask_tensor.repeat(data_tensor.shape[0], data_tensor.shape[1], 1, 1)
     data_tensor = data_tensor * full_mask_expanded
 
     print(f"Loaded and normalized data shape: {data_tensor.shape}")
     print(f"Combined Land mask shape: {land_mask_tensor.shape}")
 
-    day_of_year_tensor = torch.tensor(day_of_year_list, dtype=torch.long)
-    co2_daily_tensor = torch.tensor(co2_normalized.values, dtype=torch.long)
-    # Convert list of 2D location fields to a single tensor (N, 2, H, W)
-    location_field_tensor = torch.tensor(np.stack(location_field_list, axis=0), dtype=torch.float32) 
-    
-    print(f"Dayofyear embedding data shape: {day_of_year_tensor.shape}")
-    print(f"CO2 embedding data shape: {co2_daily_tensor.shape}")
-    print(f"Location embedding data shape: {location_field_tensor.shape}")
-
-    return data_tensor, land_mask_tensor, \
-        day_of_year_tensor, co2_daily_tensor, location_field_tensor, \
-            actual_T_range, actual_S_range
+    return (data_tensor, land_mask_tensor, conditional_data, 
+            location_field_tensor, actual_T_range, actual_S_range)
