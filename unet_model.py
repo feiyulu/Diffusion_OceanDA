@@ -169,8 +169,10 @@ class DownBlock(nn.Module):
         # Pass through residual and attention blocks
         for res_block, (self_attn, cross_attn) in zip(self.res_blocks, self.attn_blocks):
             x, mask = res_block(x, time_emb, mask)
-            x, mask = self_attn(x, mask)
-            if context is not None:
+
+            if isinstance(self_attn, SelfAttentionBlock):
+                x, mask = self_attn(x, mask)
+            if isinstance(cross_attn, CrossAttentionBlock) and context is not None:
                 x, mask = cross_attn(x, context, mask)
 
         # Store output for skip connection before downsampling
@@ -217,8 +219,9 @@ class UpBlock(nn.Module):
         current_x, current_mask = x_combined, combined_mask
         for res_block, (self_attn, cross_attn) in zip(self.res_blocks, self.attn_blocks):
             current_x, current_mask = res_block(current_x, time_emb, current_mask)
-            current_x, current_mask = self_attn(current_x, current_mask)
-            if context is not None:
+            if isinstance(self_attn, SelfAttentionBlock):
+                current_x, current_mask = self_attn(current_x, current_mask)
+            if isinstance(cross_attn, CrossAttentionBlock) and context is not None:
                 current_x, current_mask = cross_attn(current_x, context, current_mask)
 
         return current_x, current_mask
@@ -341,8 +344,9 @@ class UNet(nn.Module):
         
         # Bottleneck
         current_x, current_mask = self.bottleneck_res1(current_x, time_emb, current_mask)
-        current_x, current_mask = self.bottleneck_self_attn(current_x, current_mask)
-        if context is not None:
+        if isinstance(self.bottleneck_self_attn, SelfAttentionBlock):
+            current_x, current_mask = self.bottleneck_self_attn(current_x, current_mask)
+        if isinstance(self.bottleneck_cross_attn, CrossAttentionBlock) and context is not None:
             current_x, current_mask = self.bottleneck_cross_attn(current_x, context, current_mask)
         current_x, current_mask = self.bottleneck_res2(current_x, time_emb, current_mask)
 
