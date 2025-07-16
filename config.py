@@ -53,7 +53,8 @@ class Config:
         location_embedding_channels=2,
 
         load_model_for_sampling=False,
-        sampling_method='ddpm',
+        sampling_method='ddim',
+        ddim_eta=0.0,
         sample_days=[0],
         observation_fidelity_weight=1.0,
         observation_samples=1000,
@@ -128,6 +129,7 @@ class Config:
  
         self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method
+        self.ddim_eta = ddim_eta
         self.observation_fidelity_weight = observation_fidelity_weight
         self.observation_samples = observation_samples
 

@@ -99,29 +99,24 @@ def sample_conditional(
             (1.0 - observation_fidelity_weight) * x_0_pred[effective_observed_mask]
         )
         
-        x_0_pred = torch.clamp(x_0_pred, 0., 1.)
-        x_0_pred = x_0_pred * land_mask_expanded_channels
+        x_0_pred = torch.clamp(x_0_pred, 0., 1.) * land_mask_expanded_channels
 
         # If it's the very last step (t=0), x_0_pred is our final generated sample.
         if i == 0:
             x_t = x_0_pred
-        else:
-            if sampling_method == 'ddpm':
-                t_prev_index = i - 1 
-                sqrt_alpha_cumprod_prev_t = diffusion.sqrt_alphas_cumprod[t_prev_index] if t_prev_index >= 0 else torch.tensor(1.0).to(device)
-                sqrt_one_minus_alpha_cumprod_prev_t = diffusion.sqrt_one_minus_alphas_cumprod[t_prev_index] if t_prev_index >= 0 else torch.tensor(0.0).to(device)
+            continue
 
-                noise_for_next_step = torch.randn_like(x_t) * land_mask_expanded_channels
-                
-                x_t = sqrt_alpha_cumprod_prev_t * x_0_pred + sqrt_one_minus_alpha_cumprod_prev_t * noise_for_next_step
-            
-            elif sampling_method == 'ddim':
-                if i_idx + 1 < len(timesteps_to_sample):
-                    t_prev = timesteps_to_sample[i_idx + 1]
-                else:
-                    t_prev = -1
-                x_t = diffusion.ddim_sample(model, x_t, t, t_prev, i, current_land_mask_batch)
-            
-            x_t = x_t * land_mask_expanded_channels
+        if sampling_method.lower() == 'ddpm':
+            # For DDPM, we essentially re-noise the guided x_0_pred
+            t_prev_index = i - 1 
+            sqrt_alpha_cumprod_prev_t = diffusion.sqrt_alphas_cumprod[t_prev_index]
+            sqrt_one_minus_alpha_cumprod_prev_t = diffusion.sqrt_one_minus_alphas_cumprod[t_prev_index]
+            noise_for_next_step = torch.randn_like(x_t) * land_mask_expanded_channels
+            x_t = sqrt_alpha_cumprod_prev_t * x_0_pred + sqrt_one_minus_alpha_cumprod_prev_t * noise_for_next_step
+        
+        elif sampling_method.lower() == 'ddim':
+            # For DDIM, we pass the guided x_0_pred to the ddim_sample function
+            t_prev = timesteps_to_sample[i_idx + 1] if i_idx + 1 < len(timesteps_to_sample) else -1
+            x_t = diffusion.ddim_sample(model, x_t, t, t_prev, i, current_land_mask_batch, eta=config.ddim_eta)
 
     return x_t

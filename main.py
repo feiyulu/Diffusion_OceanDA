@@ -52,6 +52,8 @@ if __name__ == "__main__":
     print(f"Using device: {config.device}")
     print(f"Model will use {config.channels} channel(s). Salinity included: {config.use_salinity}")
     print(f"Sampling method: {config.sampling_method.upper()}")
+    if config.sampling_method.upper()=="DDIM":
+        print(f"DDIM stochastic eta: {config.ddim_eta}")
     print(f"Observation fidelity weight: {config.observation_fidelity_weight}")
     print(f"Generate training animation: {config.generate_training_animation}")
     print(f"Generalized conditioning configs: {config.conditioning_configs}")

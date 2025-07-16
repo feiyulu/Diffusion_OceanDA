@@ -130,48 +130,41 @@ class Diffusion:
             return model_mean + torch.sqrt(posterior_variance_t) * noise
 
     @torch.no_grad()
-    def ddim_sample(self, model, x, t, t_prev, current_t_idx, mask_in):
+    def ddim_sample(self, model, x, t, t_prev, current_t_idx, mask_in, eta=0.0):
         """
         Performs one step of the reverse diffusion (denoising) process using DDIM.
         
         Args:
-            model (nn.Module): The trained U-Net model.
-            x (torch.Tensor): Noisy image at current step t.
-            t (torch.Tensor): Timestep tensor for model prediction (for current t).
-            t_prev (torch.Tensor): Timestep tensor for the previous step (t-1).
-            current_t_idx (int): Scalar index for current timestep (t).
-            mask_in (torch.Tensor): Land mask (N, 1, H, W).
-
-        Returns:
-            torch.Tensor: Denoised image for the next step (x_{t-1}).
+            ...
+            eta (float): Controls the stochasticity of the sampling. 0.0 for deterministic DDIM.
         """
+        # Predict noise (epsilon_theta)
+        model_output_noise = model(x, t, mask_in)
+        mask_expanded = mask_in.float().repeat(1, x.shape[1], 1, 1)
+        model_output_noise = model_output_noise * mask_expanded
+
         # Get parameters for current and previous timesteps
-        alpha_bar_t = self.ddim_alphas[current_t_idx] # alpha_bar_t = alpha_cumprod[t]
+        alpha_bar_t = self.ddim_alphas[current_t_idx]
         alpha_bar_prev_t = self.ddim_alphas[t_prev] if t_prev >= 0 else torch.tensor(1.0).to(self.device)
 
-        sqrt_one_minus_alpha_bar_t = self.ddim_sqrt_one_minus_alphas[current_t_idx]
-        sqrt_one_minus_alpha_bar_prev_t = self.ddim_sqrt_one_minus_alphas[t_prev] if t_prev >= 0 else torch.tensor(0.0).to(self.device)
+        # Estimate x_0 (predicted clean image)
+        x_0_pred = (x - self.ddim_sqrt_one_minus_alphas[current_t_idx] * model_output_noise) / (alpha_bar_t**0.5)
+        x_0_pred = x_0_pred * mask_expanded
 
-        model_output_noise = model(x, t, mask_in) # Predict noise (epsilon_theta)
-        
-        mask_expanded = mask_in.float().repeat(1, x.shape[1], 1, 1)
-        model_output_noise = model_output_noise * mask_expanded # Zero out land regions
+        # --- NEW: Stochastic DDIM Implementation ---
+        # Calculate sigma_t, the standard deviation of the noise term
+        sigma_t = eta * torch.sqrt(
+            (1 - alpha_bar_prev_t) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev_t)
+        )
 
-        # Estimate x_0 (predicted clean image) using the noise prediction
-        # x_0_pred = (x_t - sqrt(1 - alpha_bar_t) * epsilon_theta) / sqrt(alpha_bar_t)
-        x_0_pred = (x - sqrt_one_minus_alpha_bar_t * model_output_noise) / (alpha_bar_t**0.5)
-        
-        x_0_pred = x_0_pred * mask_expanded # Zero out land regions in predicted x0
+        # The direction pointing to x_t
+        direction_pointing_to_xt = torch.sqrt(1 - alpha_bar_prev_t - sigma_t**2) * model_output_noise
 
-        # Calculate the direction pointing to x_t
-        # dir_xt = sqrt(1 - alpha_bar_prev_t) * epsilon_theta
-        # For DDIM with eta=0, this term is simplified for deterministic sampling
-        direction_pointing_to_xt = sqrt_one_minus_alpha_bar_prev_t * model_output_noise
+        # The random noise term
+        noise = torch.randn_like(x) * mask_expanded if t_prev > 0 else torch.zeros_like(x)
 
-        # The DDIM equation for x_{t-1}
-        # x_{t-1} = sqrt(alpha_bar_prev_t) * x_0_pred + dir_xt
-        x_prev = (alpha_bar_prev_t**0.5) * x_0_pred + direction_pointing_to_xt
-        
-        x_prev = x_prev * mask_expanded # Zero out land regions in x_prev
+        # The full DDIM equation for x_{t-1}
+        x_prev = (alpha_bar_prev_t**0.5) * x_0_pred + direction_pointing_to_xt + sigma_t * noise
+        x_prev = x_prev * mask_expanded
 
         return x_prev
