@@ -33,7 +33,7 @@
     },
 
     "use_2d_location_embedding": true,
-    "location_embedding_channels": 2,
+    "use_coriolis_embedding": true,
 
     "co2_filepath": "/scratch/cimes/feiyul/Ocean_Data/obs_data/co2_daily.nc",
     "co2_varname": "co2",

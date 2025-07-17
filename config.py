@@ -53,7 +53,7 @@ class Config:
         co2_range=[320,450],
 
         use_2d_location_embedding=False,
-        location_embedding_channels=2,
+        use_coriolis_embedding=False,
 
         load_model_for_sampling=False,
         sampling_method='ddpm',
@@ -133,7 +133,13 @@ class Config:
         self.co2_range = co2_range
 
         self.use_2d_location_embedding = use_2d_location_embedding    
-        self.location_embedding_channels = location_embedding_channels
+        self.use_coriolis_embedding = use_coriolis_embedding
+        
+        self.location_embedding_channels = 0
+        if self.use_2d_location_embedding:
+            self.location_embedding_channels += 2
+        if self.use_coriolis_embedding:
+            self.location_embedding_channels += 1
  
         self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method

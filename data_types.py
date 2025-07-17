@@ -1,135 +1,167 @@
+# --- data_types.py ---
+# This file defines classes and functions for handling and processing
+# oceanographic data, with a focus on Argo float profiles.
 import numpy as np
 import xarray as xr
 import scipy.interpolate as interpolate
+from typing import List, Tuple, Optional
+
+class argo_float:
+    """Class to hold a single Argo float profile."""
+    def __init__(self, time: np.datetime64, lat: float, lon: float, depth: np.ndarray, 
+                 T: np.ndarray, S: np.ndarray, meta_only: bool = False):
+        """
+        Initializes an Argo float profile.
+
+        Args:
+            time (np.datetime64): Timestamp of the profile.
+            lat (float): Latitude of the profile.
+            lon (float): Longitude of the profile.
+            depth (np.ndarray): Array of depth levels.
+            T (np.ndarray): Array of temperature values.
+            S (np.ndarray): Array of salinity values.
+            meta_only (bool): If True, only metadata is stored.
+        """
+        if not meta_only and (len(depth) != len(T) or len(depth) != len(S)):
+            raise ValueError('Argo profile data arrays must have the same length as depth array.')
+        
+        self.time = time
+        self.lat = lat
+        self.lon = lon
+        self.min_depth = depth[0] if len(depth) > 0 else np.nan
+        self.max_depth = depth[-1] if len(depth) > 0 else np.nan
+        self.levels = len(depth)
+        
+        if not meta_only:
+            self.depth = depth
+            self.T = T
+            self.S = S
+
+    def get_levels(self) -> int:
+        """Returns the number of depth levels in the profile."""
+        return self.levels
 
 class argo:
+    """A collection of Argo float profiles, with methods for loading, filtering, and processing."""
     def __init__(
-            self,dataset,nread=None,meta_only=False,nstart=0,
-            T_name='temp',S_name='salt',depth_name='depth',
-            station_index='station_index',depth_index='depth_index',time_name='time',
-            lon_name='longitude',lat_name='latitude',link_name='link',
-            interp=False,target_depth=None,year=None):
-        """Initialize an Argo float dataset."""
-        
-        links_all=dataset[link_name]
+            self, dataset: xr.Dataset, nread: Optional[int] = None, 
+            meta_only: bool = False, nstart: int = 0,
+            T_name: str = 'temp', S_name: str = 'salt', 
+            depth_name: str = 'depth', station_index: str = 'station_index', 
+            depth_index: str = 'depth_index', time_name: str = 'time',
+            lon_name: str = 'longitude', lat_name: str = 'latitude', link_name: str = 'link',
+            interp: bool = False, 
+            target_depth: Optional[np.ndarray] = None, year: Optional[int] = None):
+        """
+        Initializes an Argo float dataset from an xarray Dataset.
+
+        Args:
+            dataset (xr.Dataset): The input dataset containing Argo data.
+            nread (int, optional): The number of profiles to read. Defaults to all.
+            meta_only (bool): If True, load only metadata, not T/S/depth values.
+            nstart (int): The starting index of profiles to read.
+            interp (bool): If True, interpolate profiles to a target depth grid.
+            target_depth (np.ndarray, optional): The target depth grid for interpolation.
+            year (int, optional): If provided, only load profiles from this year.
+        """
+        links_all = dataset[link_name].values
         nobs = len(dataset[station_index])
         len_chunk = len(dataset[depth_index])
 
         dataset.load()
 
-        if interp:
-            model_z = target_depth[target_depth<2000]
-            self.model_z = model_z
-            self.model_levels = len(model_z)
-            self.interp=interp
+        self.interp = interp
+        if self.interp:
+            if target_depth is None:
+                raise ValueError("target_depth must be provided if interp is True.")
+            self.model_z = target_depth[target_depth < 2000]
+            self.model_levels = len(self.model_z)
 
-        if year:
-            time_start = np.datetime64(f'{year}-01-01T00:00:00')
-            time_end = np.datetime64(f'{year+1}-01-01T00:00:00')
-        else:
-            time_start = np.datetime64('1900-01-01T00:00:00')
-            time_end = np.datetime64('2100-01-01T00:00:00')
+        time_start = np.datetime64(f'{year}-01-01') if year else np.datetime64('1900-01-01')
+        time_end = np.datetime64(f'{year+1}-01-01') if year else np.datetime64('2100-01-01')
             
         i = nstart
-        self.profiles = []
+        self.profiles: List[argo_float] = []
         nread = nobs if (nread is None or nread + nstart > nobs) else nread
 
         while (i < nread + nstart and i < nobs):
             time = dataset[time_name][i].values
-            if (time_start < time < time_end):
-                depth = []
-                T = []
-                S = []
+            if time_start <= time < time_end:
                 lat = dataset[lat_name][i].values
                 lon = dataset[lon_name][i].values
 
-                depth=dataset[depth_name][i,0:len_chunk].data
-                if meta_only:
-                    T=[]
-                    S=[]
-                else:
-                    T=dataset[T_name][i,0:len_chunk].data
-                    S=dataset[S_name][i,0:len_chunk].data
+                depth_vals = dataset[depth_name][i, :len_chunk].data
+                T_vals = [] if meta_only else dataset[T_name][i, :len_chunk].data
+                S_vals = [] if meta_only else dataset[S_name][i, :len_chunk].data
 
-                ### link chuncked profiles together
-                while (links_all[i]):
-                    # if links_all[i+1]:
-                    depth=np.concatenate([depth,dataset[depth_name][i+1,0:len_chunk].data])
+                # Follow linked profiles to handle chunked data
+                current_link = i
+                while links_all[current_link]:
+                    next_idx = current_link + 1
+                    depth_vals = np.concatenate([depth_vals, dataset[depth_name][next_idx, :len_chunk].data])
                     if not meta_only:
-                        T=np.concatenate([T,dataset[T_name][i+1,0:len_chunk].data])
-                        S=np.concatenate([S,dataset[S_name][i+1,0:len_chunk].data])
-                    i += 1
+                        T_vals = np.concatenate([T_vals, dataset[T_name][next_idx, :len_chunk].data])
+                        S_vals = np.concatenate([S_vals, dataset[S_name][next_idx, :len_chunk].data])
+                    current_link = next_idx
+                
+                i = current_link # Move main index past the linked profiles
 
-                if (len(depth)!=len(T) or len(depth)!=len(S)):
-                    raise Exception('Argo profile levels do not match')
+                # Quality control and filtering
+                valid_mask = (depth_vals > 0) & (depth_vals < 6500) & \
+                    ~np.isnan(T_vals) & ~np.isnan(S_vals)
+                depth_clean, T_clean, S_clean = \
+                    depth_vals[valid_mask], T_vals[valid_mask], S_vals[valid_mask]
 
-                ### Remove depths outside of the 0-6500m range (missing/fill data problem)
-                depth_mask=depth[(depth>0) & (depth<6500) & ~np.isnan(T) & ~np.isnan(S)]
-                T_mask=T[(depth>0) & (depth<6500) & ~np.isnan(T) & ~np.isnan(S)]
-                S_mask=S[(depth>0) & (depth<6500) & ~np.isnan(T) & ~np.isnan(S)]
-
-                ### Remove DeepArgo profiles and profiles that didn't reach close to surface
-                if len(depth_mask)>5:
-                    if depth_mask[0]<30 or depth_mask[-1]<2000:
-                        ### Need to subsample(thinning) the profiles with too many levels
-                        if interp:
-                            T_new,S_new = argo_vertical_coarsen(depth_mask,T_mask,S_mask,model_z)
-                            self.profiles.append(argo_float(time,lat,lon,model_z,T_new,S_new,meta_only))
-                        else:
-                            self.profiles.append(argo_float(time,lat,lon,depth_mask,T_mask,S_mask,meta_only))
+                if len(depth_clean) > 5 and (depth_clean[0] < 30 or depth_clean[-1] < 2000):
+                    if self.interp:
+                        T_new, S_new = argo_vertical_coarsen(depth_clean, T_clean, S_clean, self.model_z)
+                        self.profiles.append(argo_float(time, lat, lon, self.model_z, T_new, S_new, meta_only))
+                    else:
+                        self.profiles.append(argo_float(time, lat, lon, depth_clean, T_clean, S_clean, meta_only))
             else:
-                while (links_all[i]):
-                    i += 1
+                # Skip profile and its linked parts if outside time range
+                current_link = i
+                while links_all[current_link]:
+                    current_link += 1
+                i = current_link
 
             i += 1
 
-        ### Get some summary statistics for easy diagnostics
-        self.min_depth = np.array([profile.min_depth for profile in self.profiles])
-        self.max_depth = np.array([profile.max_depth for profile in self.profiles])
-        self.levels = np.array([profile.levels for profile in self.profiles])
-        self.lat = np.array([profile.lat for profile in self.profiles])
-        self.lon = np.array([profile.lon for profile in self.profiles])
-        self.time = np.array([profile.time for profile in self.profiles])
+        # Pre-calculate summary statistics for faster filtering
+        self.min_depth = np.array([p.min_depth for p in self.profiles])
+        self.max_depth = np.array([p.max_depth for p in self.profiles])
+        self.levels = np.array([p.levels for p in self.profiles])
+        self.lat = np.array([p.lat for p in self.profiles])
+        self.lon = np.array([p.lon for p in self.profiles])
+        self.time = np.array([p.time for p in self.profiles])
 
-    def convert_interpolated_to_dataset(self):
+    def convert_interpolated_to_dataset(self) -> xr.Dataset:
+        """Converts the collection of interpolated profiles into a single xarray Dataset."""
         if not self.interp:
-            raise Exception("This Argo dataset is not interpolated")
+            raise Exception("This Argo dataset is not interpolated and cannot be converted.")
 
         nprofiles = len(self)
-        profile_index = range(nprofiles)
-        levels = self.model_levels
-        z = self.model_z
+        T_data = np.full((nprofiles, self.model_levels), np.nan, dtype=np.float32)
+        S_data = np.full((nprofiles, self.model_levels), np.nan, dtype=np.float32)
 
-        T_data = np.empty((nprofiles,levels))
-        S_data = np.empty((nprofiles,levels))
+        for i, profile in enumerate(self.profiles):
+            T_data[i, :] = profile.T
+            S_data[i, :] = profile.S
 
-        for i in range(nprofiles):
-            T_data[i,:] = self.profiles[i].T
-            S_data[i,:] = self.profiles[i].S
-
-        T_var = xr.DataArray(T_data,coords=[profile_index,z],dims=['profile','z'])
-        S_var = xr.DataArray(S_data,coords=[profile_index,z],dims=['profile','z'])
-
-        ds = xr.Dataset(dict(T=T_var,S=S_var))
-
+        ds = xr.Dataset(
+            {
+                "T": (("profile", "z"), T_data),
+                "S": (("profile", "z"), S_data),
+                "lat": (("profile",), self.lat),
+                "lon": (("profile",), self.lon),
+                "time": (("profile",), self.time),
+            },
+            coords={"profile": np.arange(nprofiles), "z": self.model_z},
+        )
         return ds
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.profiles)
-    
-    def get_profiles_by_period(self,start_time,end_time):
-        """Get profiles by time period."""
-        return [i for i,time in enumerate(self.time) if start_time <= time <= end_time]
-
-    def get_profiles_by_region(self,lat_min,lat_max,lon_min,lon_max):
-        """Get profiles by geographic region."""
-        return [i for i,(lat,lon) in enumerate(zip(self.lat,self.lon)) 
-                if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max]
-    
-    def get_profiles_by_max_depth(self, depth_min, depth_max):
-        """Get profiles by maximum depth."""
-        return [i for i, depth in enumerate(self.max_depth)
-                if depth_min <= depth <= depth_max]
 
     def get_profiles_by_all(self, start_time, end_time,
                             lat_min=-90, lat_max=90, 
@@ -142,96 +174,106 @@ class argo:
                 lat_min <= lat <= lat_max and
                 lon_min <= lon <= lon_max and
                 depth_min <= depth <= depth_max]
-    
-class argo_float:
-    """Class to hold a single Argo float profile."""
-    def __init__(self,time,lat,lon,depth,T,S,meta_only=False):
-        """Initialize an Argo float profile."""
-        if (len(depth)!=len(T) or len(depth)!=len(S)):
-            raise Exception('Argo profile levels do not match')
-        self.time = time
-        self.lat = lat
-        self.lon = lon
-        self.min_depth = depth[0]
-        self.max_depth = depth[-1]
-        self.levels = len(depth)
-        if not meta_only:
-            self.depth = depth
-            self.T = T
-            self.S = S
 
-    def get_levels(self):
-        return len(self.depth)
+def argo_vertical_coarsen(depth: np.ndarray, T: np.ndarray, S: np.ndarray, target_depth: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Interpolates Argo T/S profiles to a target vertical grid using cubic splines.
 
-def depth_vertical_coarsen(model_dz,combine_levels):
+    Args:
+        depth (np.ndarray): Original depth levels of the Argo profile.
+        T (np.ndarray): Original temperature values.
+        S (np.ndarray): Original salinity values.
+        target_depth (np.ndarray): The target depth grid for interpolation.
 
-    if combine_levels[-1] > len(model_dz):
-        raise Exception('Combine levels exceed depth levels')
-
-    model_zi = np.zeros(len(model_dz)+1)
-    for i in range(1,len(model_dz)+1):
-        model_zi[i] = model_dz[0:i].sum().values
-
-    model_z_coarse = np.zeros(len(combine_levels)-1)
-    model_dz_coarse = np.zeros(len(combine_levels)-1)
-    model_zi_coarse = np.zeros(len(combine_levels))
-    for i in range(1,len(combine_levels)):
-        model_dz_coarse[i-1] = model_dz[combine_levels[i-1]:combine_levels[i]].sum().data
-        model_zi_coarse[i] = model_zi[combine_levels[i]]
-        model_z_coarse[i-1] = (model_zi_coarse[i]+model_zi_coarse[i-1])/2
-
-    return model_dz_coarse,model_z_coarse
-
-def variable_vertical_coarsen(
-    Var,model_dz,combine_levels,
-    time_name='time',x_name='xh',y_name='yh',z_name='z'):
-
-    if combine_levels[-1] > len(model_dz):
-        raise Exception('Combine levels exceed depth levels')
-    if len(Var[z_name]) != len(model_dz):
-        raise Exception('vertical levels not matched')
- 
-    model_z = np.zeros(len(model_dz))
-    model_z[0] = model_dz[0]/2 
-    for i in range(1,len(model_dz)):
-        model_z[i] = model_z[i-1] + (model_dz[i-1]+model_dz[i])/2
-    model_zi = np.zeros(len(model_dz)+1)
-    for i in range(1,len(model_dz)+1):
-        model_zi[i] = model_dz[0:i].sum().values
-  
-    model_z_coarse = np.zeros(len(combine_levels)-1)
-    model_dz_coarse = np.zeros(len(combine_levels)-1)
-    model_zi_coarse = np.zeros(len(combine_levels))
-    for i in range(1,len(combine_levels)):
-        model_dz_coarse[i-1] = model_dz[combine_levels[i-1]:combine_levels[i]].sum().data
-        model_zi_coarse[i] = model_zi[combine_levels[i]]
-        model_z_coarse[i-1] = (model_zi_coarse[i]+model_zi_coarse[i-1])/2
-
-    Var_data_coarse = np.empty((len(Var[time_name]),len(model_dz_coarse),len(Var[y_name]),len(Var[x_name])))
-    Var_weighted = Var*model_dz.data[None,:,None,None]
-    for i in range(len(model_dz_coarse)):
-        Var_data_coarse[:,i,:,:] = \
-            Var_weighted[:,combine_levels[i]:combine_levels[i+1],:,:].sum(dim=z_name,skipna=True)/\
-            model_dz_coarse[i]
-
-    Var_coarse = xr.DataArray(
-        Var_data_coarse,
-        coords=[Var[time_name],model_z_coarse,Var[y_name],Var[x_name]],
-        dims=Var.dims).astype('float32')
-
-    return Var_coarse
-
-def argo_vertical_coarsen(depth,T,S,target_depth):
-
-    T_target = np.empty(len(target_depth))
-    S_target = np.empty(len(target_depth))
-
-    # T_target = np.interp(target_depth,depth,T,left=np.nan,right=np.nan)
-    # S_target = np.interp(target_depth,depth,S,left=np.nan,right=np.nan)
-
-    spl_T = interpolate.CubicSpline(depth,T,extrapolate=False)
+    Returns:
+        A tuple containing (interpolated Temperature, interpolated Salinity).
+    """
+    # Use cubic spline interpolation for smoother results. Extrapolate=False returns NaNs outside the original depth range.
+    spl_T = interpolate.CubicSpline(depth, T, extrapolate=False)
     T_target = spl_T(target_depth)
-    spl_S = interpolate.CubicSpline(depth,S,extrapolate=False)
+    spl_S = interpolate.CubicSpline(depth, S, extrapolate=False)
     S_target = spl_S(target_depth)
 
-    return T_target, S_target
+    return T_target.astype(np.float32), S_target.astype(np.float32)
+
+def depth_vertical_coarsen(model_dz: xr.DataArray, combine_levels: List[int]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Coarsens a model's vertical grid definition.
+
+    Args:
+        model_dz (xr.DataArray): DataArray of layer thicknesses.
+        combine_levels (List[int]): List of indices defining the boundaries of the new coarse layers.
+
+    Returns:
+        A tuple containing (coarse layer thicknesses, coarse layer center depths).
+    """
+    if combine_levels[-1] > len(model_dz):
+        raise ValueError('Combine levels exceed depth levels')
+
+    model_zi = np.zeros(len(model_dz) + 1)
+    model_zi[1:] = np.cumsum(model_dz.values)
+
+    model_zi_coarse = model_zi[combine_levels]
+    model_dz_coarse = np.diff(model_zi_coarse)
+    model_z_coarse = model_zi_coarse[:-1] + model_dz_coarse / 2
+
+    return model_dz_coarse, model_z_coarse
+
+def variable_vertical_coarsen(
+    Var: xr.DataArray,
+    model_dz: xr.DataArray,
+    combine_levels: List[int],
+    time_name: str = 'time',
+    x_name: str = 'xh',
+    y_name: str = 'yh',
+    z_name: str = 'z'
+) -> xr.DataArray:
+    """
+    Coarsens a data variable on a model's vertical grid by performing a weighted average.
+
+    Args:
+        Var (xr.DataArray): The 4D data variable to be coarsened (time, z, y, x).
+        model_dz (xr.DataArray): DataArray of the original fine layer thicknesses.
+        combine_levels (List[int]): List of indices defining the new coarse layers.
+        time_name (str): Name of the time dimension.
+        x_name (str): Name of the x-coordinate dimension.
+        y_name (str): Name of the y-coordinate dimension.
+        z_name (str): Name of the z-coordinate dimension.
+
+    Returns:
+        xr.DataArray: The vertically coarsened data variable.
+    """
+    if combine_levels[-1] > len(model_dz):
+        raise ValueError('Combine levels exceed depth levels')
+    if len(Var[z_name]) != len(model_dz):
+        raise ValueError('Variable vertical levels do not match model_dz levels')
+
+    # Call the existing function to get the coarse grid properties. This avoids code duplication.
+    model_dz_coarse, model_z_coarse = depth_vertical_coarsen(model_dz, combine_levels)
+
+    # Prepare an empty array for the coarsened data
+    coarse_shape = (len(Var[time_name]), len(model_dz_coarse), len(Var[y_name]), len(Var[x_name]))
+    Var_data_coarse = np.empty(coarse_shape, dtype=np.float32)
+    
+    # Weight the variable by the thickness of each layer for accurate averaging
+    Var_weighted = Var * model_dz.data[None, :, None, None]
+    
+    for i in range(len(model_dz_coarse)):
+        # Sum the weighted variable over the fine levels that make up one coarse level
+        var_sum = Var_weighted[:, combine_levels[i]:combine_levels[i+1], :, :].sum(dim=z_name, skipna=True)
+        # Divide by the total thickness of the coarse level to get the weighted average
+        Var_data_coarse[:, i, :, :] = var_sum / model_dz_coarse[i]
+
+    # Create the new xarray DataArray with the coarsened coordinates
+    Var_coarse = xr.DataArray(
+        Var_data_coarse,
+        coords={
+            time_name: Var[time_name],
+            z_name: model_z_coarse,
+            y_name: Var[y_name],
+            x_name: Var[x_name]
+        },
+        dims=Var.dims
+    ).astype('float32')
+
+    return Var_coarse

@@ -23,7 +23,8 @@ def load_ocean_data(
     co2_filepath=None,
     co2_varname="co2",
     co2_range=[320,450],
-    conditioning_configs=None): 
+    conditioning_configs=None,
+    use_coriolis_embedding=False): 
     """
     Loads ocean data from xarray/NetCDF files for temperature and optionally salinity,
     applies spatial and temporal slicing, combines into channels, and normalizes.
@@ -60,7 +61,6 @@ def load_ocean_data(
     actual_T_range = []
     actual_S_range = []
     conditional_data = {}
-    location_field_list = []
 
     # This inner function is a refactoring of the original loading logic
     def _load_and_process_variable(filepaths, varname, mask_static, min_val_in=None, max_val_in=None):
@@ -125,10 +125,23 @@ def load_ocean_data(
     actual_lats = ds_ref.lat.isel(lat=slice(lat_range[0], lat_range[1])).values
     actual_lons = ds_ref.lon.isel(lon=slice(lon_range[0], lon_range[1])).values
     lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons, indexing='ij')
-    normalized_lat_grid = (lat_grid - (-90)) / (90 - (-90)) * 2 - 1
-    normalized_lon_grid = (lon_grid - 0) / (360 - 0) * 2 - 1
-    location_field_single_sample = np.stack([normalized_lat_grid, normalized_lon_grid], axis=0).astype(np.float32)
-    # The location field is static for all time steps in this dataset
+
+    normalized_lat_grid = (lat_grid / 90.0).astype(np.float32)
+    normalized_lon_grid = ((lon_grid / 180.0) - 1.0).astype(np.float32)
+
+    location_channels = [normalized_lat_grid, normalized_lon_grid]
+
+    if use_coriolis_embedding:
+        print("Calculating and adding Coriolis parameter to location embedding...")
+        omega = 7.2921e-5  # Earth's rotation rate in rad/s
+        lat_rad = np.deg2rad(lat_grid)
+        coriolis_f = 2 * omega * np.sin(lat_rad)
+        
+        # Normalize by the maximum possible value of f (at the pole) to scale to [-1, 1]
+        normalized_coriolis = (coriolis_f / (2 * omega)).astype(np.float32)
+        location_channels.append(normalized_coriolis)
+
+    location_field_single_sample = np.stack(location_channels, axis=0)
     location_field_tensor = torch.tensor(location_field_single_sample, dtype=torch.float32).unsqueeze(0)
     print(f"Location embedding data shape: {location_field_tensor.shape}")
 

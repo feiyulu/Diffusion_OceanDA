@@ -32,7 +32,7 @@ def plot_ensemble_results(
     true_sample_np = true_sample.cpu().numpy()
 
     num_channels = config.channels
-    fig, axes = plt.subplots(6, num_channels, figsize=(12*num_channels, 36), squeeze=False)
+    fig, axes = plt.subplots(6, num_channels, figsize=(12*num_channels, 24), squeeze=False)
 
     for c in range(num_channels):
         var_name = "Temperature" if c == 0 else "Salinity"
@@ -99,7 +99,7 @@ def plot_ensemble_results(
     plot_save_path = (
         f"{config.sample_plot_dir}/"
         f"ensemble_obs{num_obs_points}_day{sample_day[0]}_"
-        f"ens{config.ensemble_size}_{config.sampling_method}.png")
+        f"ens{ensemble_size}_{config.sampling_method}.png")
     plt.savefig(plot_save_path)
     print(f"Ensemble plot saved to {plot_save_path}")
     plt.show()

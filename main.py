@@ -70,7 +70,8 @@ if __name__ == "__main__":
         variable_names=[config.varname_t, config.varname_s],
         T_range=config.T_range, S_range=config.S_range,
         co2_filepath=config.co2_filepath, co2_varname=config.co2_varname, co2_range=config.co2_range,
-        conditioning_configs=config.conditioning_configs # Pass configs to data loader
+        conditioning_configs=config.conditioning_configs, # Pass configs to data loader
+        use_coriolis_embedding=config.use_coriolis_embedding
     )
 
     print(f"Data size: {data.shape}")
@@ -237,7 +238,8 @@ if __name__ == "__main__":
             conditioning_configs=config.conditioning_configs,
             co2_filepath=config.co2_filepath,
             co2_varname=config.co2_varname,
-            co2_range=config.co2_range
+            co2_range=config.co2_range,
+            use_coriolis_embedding=config.use_coriolis_embedding
         )
         true_sample = true_sample.to(config.device)
 
