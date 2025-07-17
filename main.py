@@ -126,6 +126,16 @@ if __name__ == "__main__":
     ).to(config.device)
 
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
+    # Initialize the Learning Rate Scheduler ---
+    scheduler = None
+    if config.use_lr_scheduler:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=config.lr_scheduler_T_max,
+            eta_min=config.lr_scheduler_eta_min
+        )
+        print(f"Initialized CosineAnnealingLR scheduler with T_max={config.lr_scheduler_T_max} and eta_min={config.lr_scheduler_eta_min}.")
+
     start_epoch = 0
 
     # Logic to find and load the latest checkpoint
@@ -177,7 +187,7 @@ if __name__ == "__main__":
     train_losses, val_losses = [], [] # Initialize loss lists
     if not config.load_model_for_sampling or start_epoch == 0: 
         train_losses, val_losses = train_diffusion_model(
-            model, train_loader, val_loader, diffusion, optimizer, 
+            model, train_loader, val_loader, diffusion, optimizer, scheduler,
             config.epochs, config.device, land_mask, 
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             start_epoch=start_epoch, 
@@ -381,7 +391,13 @@ if __name__ == "__main__":
                     plt.scatter(x, y, color='black', marker='o', s=1)
             
             plt.tight_layout()
-            plot_save_path_t = f"{config.sample_plot_dir}/ODA_obs{num_obs_points}_day{sample_day[0]}_T.png"
+            if config.sampling_method.upper()=='DDIM':
+                sampling_str = f"{config.sampling_method}{config.ddim_eta}"
+            elif config.sampling_method.upper()=='dpm-solver++':
+                sampling_str = f"{config.sampling_method}{config.sampling_steps}"
+            else:
+                sampling_str = f"{config.sampling_method}"
+            plot_save_path_t = f"{config.sample_plot_dir}/ODA_obs{num_obs_points}_day{sample_day[0]}_{sampling_str}_T.png"
             plt.savefig(plot_save_path_t) # Save the plot to a file
             plt.show()
 

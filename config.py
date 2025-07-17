@@ -35,6 +35,9 @@ class Config:
         epochs=100,
         batch_size=200,
         learning_rate=1e-5,
+        use_lr_scheduler=True,
+        lr_scheduler_T_max=100,
+        lr_scheduler_eta_min=1e-7, 
         gradient_accumulation_steps=1,
         channel_wise_normalization=True,
         validation_split=0.1,
@@ -53,7 +56,9 @@ class Config:
         location_embedding_channels=2,
 
         load_model_for_sampling=False,
-        sampling_method='ddim',
+        sampling_method='ddpm',
+        ensemble_size=1,
+        sampling_steps=20,
         ddim_eta=0.0,
         sample_days=[0],
         observation_fidelity_weight=1.0,
@@ -112,6 +117,9 @@ class Config:
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.use_lr_scheduler = use_lr_scheduler
+        self.lr_scheduler_T_max = lr_scheduler_T_max if lr_scheduler_T_max is not None else epochs
+        self.lr_scheduler_eta_min = lr_scheduler_eta_min
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.channel_wise_normalization = channel_wise_normalization
         self.validation_split = validation_split
@@ -129,6 +137,8 @@ class Config:
  
         self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method
+        self.ensemble_size = ensemble_size
+        self.sampling_steps = sampling_steps
         self.ddim_eta = ddim_eta
         self.observation_fidelity_weight = observation_fidelity_weight
         self.observation_samples = observation_samples

@@ -16,7 +16,7 @@ from diffusion_process import Diffusion # Already imported
 
 # --- Training Function ---
 def train_diffusion_model(
-    model, train_loader, val_loader, diffusion, optimizer, 
+    model, train_loader, val_loader, diffusion, optimizer, scheduler,
     epochs, device, land_mask, gradient_accumulation_steps=1,
     start_epoch=0,
     # NEW: use_... flags are no longer needed here, the model knows from its config
@@ -96,6 +96,12 @@ def train_diffusion_model(
         avg_val_loss = total_val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
         print(f"Epoch {epoch+1} finished, Average Validation Loss: {avg_val_loss:.4f}")
+
+        # Step the learning rate scheduler ---
+        if scheduler is not None:
+            scheduler.step()
+            print(f"LR Scheduler stepped. New LR: {scheduler.get_last_lr()[0]}")
+
         model.train()
 
         # Save checkpoint periodically
@@ -111,9 +117,8 @@ def train_diffusion_model(
             print("Checkpoint saved.")
 
             # Save loss plot
-            plot_save_dir = os.path.dirname(loss_plot_dir)
             plot_filename = f"loss_plot_{test_id}_epoch_{epoch+1}.png"
-            specific_plot_path = os.path.join(plot_save_dir, plot_filename)
+            specific_plot_path = os.path.join(loss_plot_dir, plot_filename)
             plot_losses(train_losses, val_losses, specific_plot_path)
             print(f"Loss plot for epoch {epoch+1} saved to {specific_plot_path}")
 
