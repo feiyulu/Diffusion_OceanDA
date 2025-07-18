@@ -16,6 +16,7 @@ from data_utils import load_ocean_data
 from unet_model import UNet, count_parameters
 from diffusion_process import Diffusion
 from sampling_utils import sample_conditional
+from observation_utils import create_observation_tensors_from_sparse_data
 
 def plot_ensemble_results(
     ensemble_mean, ensemble_spread, true_sample, clim_pred, 
@@ -190,7 +191,15 @@ if __name__ == "__main__":
                         (config.S_range[1]-config.S_range[0])
                 clim_pred.append(clim_s_pred.squeeze())
 
-        for num_obs_points in config.observation_samples:
+        if config.use_real_observations:
+            observations, observed_mask, obs_points_actual = create_observation_tensors_from_sparse_data(
+                config, sample_day_datetime, true_sample.shape
+            )
+            num_obs_points = len(obs_points_actual)
+        else:
+            # Use the original method of sampling from the ground truth
+            print("Generating synthetic observations by sampling from ground truth...")
+            num_obs_points = config.observation_samples[0]
             observations = torch.zeros_like(true_sample)
             observed_mask = torch.zeros_like(true_sample, dtype=torch.bool)
             ocean_coords_h, ocean_coords_w = np.where(land_mask_global[0, 0].cpu().numpy() == 1)
@@ -209,38 +218,38 @@ if __name__ == "__main__":
                     observations[0, c, y, x] = val
                     observed_mask[0, c, y, x] = True
                     obs_points_actual.append((c, y, x, val))
+            print(f"Generated {len(obs_points_actual)} synthetic observation points.")
 
+        # --- 4. Generate Ensemble ---
+        ensemble_members = []
+        print(f"Generating ensemble of size {config.ensemble_size} for day {sample_day} with {num_obs_points} observations...")
+        for _ in tqdm(range(config.ensemble_size), desc="Ensemble Sampling"):
+            generated_sample = sample_conditional(
+                model, diffusion, num_samples=1,
+                observations=observations, observed_mask=observed_mask,
+                land_mask=land_mask_global, channels=config.channels, image_size=config.image_size,
+                device=config.device, sampling_method=config.sampling_method,
+                observation_fidelity_weight=config.observation_fidelity_weight,
+                target_conditions=true_conditions_dict,
+                target_location_field=target_location_field,
+                config=config
+            )
+            ensemble_members.append(generated_sample.squeeze(0))
 
-            # --- 4. Generate Ensemble ---
-            ensemble_members = []
-            print(f"Generating ensemble of size {config.ensemble_size} for day {sample_day} with {num_obs_points} observations...")
-            for _ in tqdm(range(config.ensemble_size), desc="Ensemble Sampling"):
-                generated_sample = sample_conditional(
-                    model, diffusion, num_samples=1,
-                    observations=observations, observed_mask=observed_mask,
-                    land_mask=land_mask_global, channels=config.channels, image_size=config.image_size,
-                    device=config.device, sampling_method=config.sampling_method,
-                    observation_fidelity_weight=config.observation_fidelity_weight,
-                    target_conditions=true_conditions_dict,
-                    target_location_field=target_location_field,
-                    config=config
-                )
-                ensemble_members.append(generated_sample.squeeze(0))
+        # --- 5. Analyze and Visualize Ensemble ---
+        ensemble_options = [
+            num for num in [1,2,3,4,5,10,20,40,80] 
+            if num < config.ensemble_size]
+        ensemble_options.append(config.ensemble_size)
+        for ensemble_select in ensemble_options:
+            ensemble_tensor = torch.stack(ensemble_members[0:ensemble_select])
+            ensemble_mean = torch.mean(ensemble_tensor, dim=0)
+            ensemble_spread = torch.std(ensemble_tensor, dim=0)
 
-            # --- 5. Analyze and Visualize Ensemble ---
-            ensemble_options = [
-                num for num in [1,2,3,4,5,10,20,40,80] 
-                if num < config.ensemble_size]
-            ensemble_options.append(config.ensemble_size)
-            for ensemble_select in ensemble_options:
-                ensemble_tensor = torch.stack(ensemble_members[0:ensemble_select])
-                ensemble_mean = torch.mean(ensemble_tensor, dim=0)
-                ensemble_spread = torch.std(ensemble_tensor, dim=0)
-
-                plot_ensemble_results(
-                    ensemble_mean, ensemble_spread, true_sample.squeeze(0), clim_pred, 
-                    obs_points_actual, land_mask_global.squeeze(0).squeeze(0).cpu().numpy(), 
-                    config, sample_day, num_obs_points, select_size=ensemble_select
-                )
+            plot_ensemble_results(
+                ensemble_mean, ensemble_spread, true_sample.squeeze(0), clim_pred, 
+                obs_points_actual, land_mask_global.squeeze(0).squeeze(0).cpu().numpy(), 
+                config, sample_day, num_obs_points, select_size=ensemble_select
+            )
 
     print("\nEnsemble sampling and analysis complete.")

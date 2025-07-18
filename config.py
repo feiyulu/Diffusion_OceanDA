@@ -23,7 +23,7 @@ class Config:
         # --- Data Slicing and Subsetting ---
         lat_range=[26,154],
         lon_range=[120,248],
-        training_day_range=["20130101", "20141231"],
+        training_years=[2013, 2014],
         training_day_interval=1,
     
         # --- Normalization Ranges ---
@@ -77,7 +77,14 @@ class Config:
         sampling_steps=20,
         ddim_eta=0.0,
         observation_fidelity_weight=1.0,
+
+        use_real_observations=False,
+        observation_path_template="/path/to/obs_data/argo/argo_{year}_interp.nc",
+        observation_time_window_days=3,
+        observation_operator="nearest_neighbor",
+
         observation_samples=[1000],
+        sample_years=[2024,2025],
         sample_days=[[0]],
         ):
         
@@ -89,16 +96,24 @@ class Config:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # --- Path and Data Settings ---
-        self.filepath_t = filepath_t 
-        self.filepath_s = filepath_s if self.use_salinity else None
-        self.filepath_t_test = filepath_t_test
-        self.filepath_s_test = filepath_s_test if self.use_salinity else None
+        self.filepath_t = [
+            filepath_t.format(year=year) for year in range(training_years[0],training_years[1]+1)
+        ]
+        self.filepath_s = [
+            filepath_s.format(year=year) for year in range(training_years[0],training_years[1]+1)
+        ] if self.use_salinity else None
+        self.filepath_t_test = [
+            filepath_t_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)
+        ]
+        self.filepath_s_test = [
+            filepath_s_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)
+        ] if self.use_salinity else None
         self.filepath_static = filepath_static
         self.varname_t = varname_t
         self.varname_s = varname_s if self.use_salinity else None
         self.lat_range = lat_range
         self.lon_range = lon_range
-        self.training_day_range = training_day_range
+        self.training_day_range=[f"{training_years[0]}0101",f"{training_years[1]}1231"]
         self.training_day_interval = training_day_interval
         self.sample_days = sample_days
         self.T_range = T_range
