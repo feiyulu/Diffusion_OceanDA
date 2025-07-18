@@ -1,49 +1,56 @@
 # --- config.py ---
 # This file defines global configuration parameters for the diffusion model.
 import torch
-import json # Import json module for file operations
-import os # Import os for path handling
+import json
+import os
 
 class Config:
     def __init__(
         self,
         test_id,
         image_size=(128, 128),
-        real_data=True, # Added as an argument
         use_salinity=False,
-        data_points=500, # This is only relevant for synthetic data
 
-        filepath_t=None, # Default to None, set dynamically if real_data
-        filepath_s=None, # Default to None, set dynamically if real_data
-        filepath_t_test=None, # Default to None, set dynamically if real_data
-        filepath_s_test=None, # Default to None, set dynamically if real_data
-        varname_t='sst', # Default value
-        varname_s='sss', # Default value
+        # --- File Paths and Variable Names ---
+        filepath_t=None,
+        filepath_s=None,
+        filepath_t_test=None,
+        filepath_s_test=None,
+        varname_t='sst',
+        varname_s='sss',
 
-        lat_range=[26,154], # Default value
-        lon_range=[120,248], # Default value
+        # --- Data Slicing and Subsetting ---
+        lat_range=[26,154],
+        lon_range=[120,248],
         training_day_range=["20130101", "20141231"],
         training_day_interval=1,
     
-        T_range=[-2,33], # Default value
-        S_range=[32,37], # Default value
+        # --- Normalization Ranges ---
+        T_range=[-2,33],
+        S_range=[32,37],
 
+        # --- Core Diffusion Model Hyperparameters ---
         timesteps=1000,
         beta_start=1e-5,
         beta_end=0.01,
+
+        # --- U-Net Architecture ---
         base_unet_channels=32,
+
+        # --- Training Parameters ---
         epochs=100,
         batch_size=200,
-        learning_rate=1e-5,
+        learning_rate=1e-4,
         use_lr_scheduler=True,
         lr_scheduler_T_max=100,
-        lr_scheduler_eta_min=1e-7, 
+        lr_scheduler_eta_min=1e-6, 
         gradient_accumulation_steps=1,
         channel_wise_normalization=True,
         validation_split=0.1,
         save_model_after_training=True,
         save_interval=10,
 
+        # --- Conditioning Parameters ---
         conditioning_configs={
             "dayofyear": {"dim": 64},
             "co2": {"dim": 64}
@@ -54,62 +61,47 @@ class Config:
 
         use_2d_location_embedding=False,
         use_coriolis_embedding=False,
+        use_cyclical_lon_embedding=False,
 
+        # --- Sampling Parameters ---
         load_model_for_sampling=False,
         sampling_method='ddpm',
         ensemble_size=1,
         sampling_steps=20,
         ddim_eta=0.0,
-        sample_days=[0],
         observation_fidelity_weight=1.0,
-        observation_samples=1000,
+        observation_samples=[1000],
+        sample_days=[[0]],
         ):
         
+        # --- Basic Setup ---
         self.test_id = test_id
         self.image_size = image_size
-        self.real_data = real_data
-        self.data_points = None if real_data else data_points
         self.use_salinity = use_salinity
         self.channels = 2 if self.use_salinity else 1
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Conditional real data file paths
-        if self.real_data:
-            # Set default values for file paths if not provided
-            self.filepath_t = filepath_t 
-            self.filepath_s = filepath_s if self.use_salinity else None
-            self.filepath_t_test = filepath_t_test
-            self.filepath_s_test = filepath_s_test if self.use_salinity else None
-            self.varname_t = varname_t
-            self.varname_s = varname_s if self.use_salinity else None
-            self.lat_range = lat_range
-            self.lon_range = lon_range
-            self.training_day_range = training_day_range
-            self.training_day_interval = training_day_interval
-            
-            self.sample_days = sample_days
-            self.T_range = T_range
-            self.S_range = S_range if self.use_salinity else None
-        else:
-            # Set None for real data paths if not using real data
-            self.filepath_t = None
-            self.filepath_s = None
-            self.filepath_t_test = None
-            self.filepath_s_test = None
-            self.varname_t = None
-            self.varname_s = None
-            self.lat_range = None
-            self.lon_range = None
-            self.training_day_range = None
-            self.training_day_interval = None
-            self.sample_days = None
-            self.T_range = None
-            self.S_range = None
+        # --- Path and Data Settings ---
+        self.filepath_t = filepath_t 
+        self.filepath_s = filepath_s if self.use_salinity else None
+        self.filepath_t_test = filepath_t_test
+        self.filepath_s_test = filepath_s_test if self.use_salinity else None
+        self.varname_t = varname_t
+        self.varname_s = varname_s if self.use_salinity else None
+        self.lat_range = lat_range
+        self.lon_range = lon_range
+        self.training_day_range = training_day_range
+        self.training_day_interval = training_day_interval
+        self.sample_days = sample_days
+        self.T_range = T_range
+        self.S_range = S_range if self.use_salinity else None
 
+        # --- Output Directory Management ---
         self.output_dir = f"/scratch/cimes/feiyul/Diffusion_OceanDA/{self.test_id}"
         if not os.path.isdir(self.output_dir):
             os.mkdir(self.output_dir)
 
+        # --- Store Model and Training Settings ---
         self.timesteps = timesteps
         self.beta_start = beta_start
         self.beta_end = beta_end
@@ -126,21 +118,25 @@ class Config:
         self.save_model_after_training = save_model_after_training
         self.save_interval = save_interval
 
+        # --- Store Conditioning Settings ---
         self.conditioning_configs = conditioning_configs
-       
         self.co2_filepath = co2_filepath
         self.co2_varname = co2_varname
         self.co2_range = co2_range
 
         self.use_2d_location_embedding = use_2d_location_embedding    
         self.use_coriolis_embedding = use_coriolis_embedding
+        self.use_cyclical_lon_embedding = use_cyclical_lon_embedding
         
+        # Dynamically calculate the number of location embedding channels based on flags.
         self.location_embedding_channels = 0
         if self.use_2d_location_embedding:
-            self.location_embedding_channels += 2
+            # Lat channel + Lon channel(s)
+            self.location_embedding_channels += 1 + (2 if self.use_cyclical_lon_embedding else 1)
         if self.use_coriolis_embedding:
             self.location_embedding_channels += 1
  
+        # --- Store Sampling Settings ---
         self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method
         self.ensemble_size = ensemble_size
@@ -149,7 +145,8 @@ class Config:
         self.observation_fidelity_weight = observation_fidelity_weight
         self.observation_samples = observation_samples
 
-        # Dynamic paths must be set after their dependencies are defined
+        # --- Dynamically Generated Paths ---
+        # These paths are constructed based on the test_id and other settings.
         self.model_checkpoint_dir = f"{self.output_dir}/checkpoints"
         os.makedirs(self.model_checkpoint_dir, exist_ok=True)
         self.loss_plot_dir = f"{self.output_dir}/loss_plots"
@@ -162,47 +159,25 @@ class Config:
 
     @classmethod
     def from_json_file(cls, filepath):
-        """
-        Loads configuration settings from a JSON file and returns a Config object.
-        """
+        """Loads configuration settings from a JSON file and returns a Config object."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Config file not found: {filepath}")
-        
         with open(filepath, 'r') as f:
             settings = json.load(f)
-        
-        # Convert list for image_size tuple back to tuple if loaded from JSON
         if 'image_size' in settings and isinstance(settings['image_size'], list):
             settings['image_size'] = tuple(settings['image_size'])
-
-        # Create a Config instance with loaded settings
-        # Use **settings to unpack the dictionary into keyword arguments
         return cls(**settings)
 
     def to_json_file(self, filepath):
-        """
-        Saves the current configuration settings to a JSON file.
-        """
-        # Convert tuple to list for JSON serialization if necessary
+        """Saves the current configuration settings to a JSON file."""
         settings = self.__dict__.copy()
         if isinstance(settings.get('image_size'), tuple):
             settings['image_size'] = list(settings['image_size'])
-        
-        # Remove torch.device object as it's not JSON serializable; it's dynamically set.
         if 'device' in settings:
             del settings['device']
-
-        # Remove dynamically generated paths before saving to avoid redundancy,
-        # or ensure they are properly handled if they rely on other dynamic vars.
-        # For simplicity, we'll exclude them if they are f-strings based on other values.
-        # This assumes the dynamic paths are recreated correctly during from_json_file.
         for key in ['model_checkpoint_dir','loss_plot_dir','sample_plot_dir','training_animation_path']:
             if key in settings:
                 del settings[key]
-        
         with open(filepath, 'w') as f:
             json.dump(settings, f, indent=4)
         print(f"Configuration saved to {filepath}")
-
-# Create a global config object using the new constructor
-# config = Config()

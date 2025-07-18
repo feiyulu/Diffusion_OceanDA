@@ -63,15 +63,9 @@ if __name__ == "__main__":
 
     # 1. Prepare Data
     data, land_mask, conditional_data, location_field_data, T_range, S_range = load_ocean_data(
-        config.filepath_t, config.image_size, config.channels,
-        time_range=config.training_day_range, time_interval=config.training_day_interval,
-        lat_range=config.lat_range, lon_range=config.lon_range,
-        use_salinity=config.use_salinity, filepath_s=config.filepath_s,
-        variable_names=[config.varname_t, config.varname_s],
-        T_range=config.T_range, S_range=config.S_range,
-        co2_filepath=config.co2_filepath, co2_varname=config.co2_varname, co2_range=config.co2_range,
-        conditioning_configs=config.conditioning_configs, # Pass configs to data loader
-        use_coriolis_embedding=config.use_coriolis_embedding
+        config,
+        time_range=config.training_day_range,
+        is_test_data=False
     )
 
     print(f"Data size: {data.shape}")
@@ -226,20 +220,9 @@ if __name__ == "__main__":
     # Load new "true" samples to serve as the ground truth for observations
     for sample_day in config.sample_days:
         true_sample, _, true_conditions_dict, true_location_field_single, _, _ = load_ocean_data(
-            config.filepath_t_test,
-            config.image_size, config.channels,
+            config,
             time_range=sample_day,
-            time_interval=1,
-            lat_range=config.lat_range,lon_range=config.lon_range,
-            use_salinity=config.use_salinity,
-            filepath_s=config.filepath_s_test,
-            variable_names=[config.varname_t, config.varname_s],
-            T_range=config.T_range,S_range=config.S_range,
-            conditioning_configs=config.conditioning_configs,
-            co2_filepath=config.co2_filepath,
-            co2_varname=config.co2_varname,
-            co2_range=config.co2_range,
-            use_coriolis_embedding=config.use_coriolis_embedding
+            is_test_data=True
         )
         true_sample = true_sample.to(config.device)
 

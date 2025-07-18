@@ -202,6 +202,11 @@ class UpBlock(nn.Module):
     def forward(self, x, skip_x, time_emb, mask_from_prev_up, skip_mask, context=None):
         # Upsample input from previous level
         x_upsampled = self.upsample_conv(x)
+
+        # Resize the upsampled tensor to match the skip connection.
+        if x_upsampled.shape[-2:] != skip_x.shape[-2:]:
+            x_upsampled = F.interpolate(x_upsampled, size=skip_x.shape[-2:], mode='bilinear', align_corners=False)
+
         mask_upsampled = F.interpolate(mask_from_prev_up[:,:1,:,:], size=x_upsampled.shape[-2:], mode='nearest')
         mask_upsampled = (mask_upsampled > 0.5).float().repeat(1, x_upsampled.shape[1], 1, 1)
 

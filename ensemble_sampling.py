@@ -158,14 +158,9 @@ if __name__ == "__main__":
     land_mask_global = None
     for sample_day in config.sample_days:
         true_sample, land_mask, true_conditions_dict, true_location_field_single, _, _ = load_ocean_data(
-            config.filepath_t_test, config.image_size, config.channels,
-            time_range=sample_day, time_interval=1,
-            lat_range=config.lat_range, lon_range=config.lon_range,
-            use_salinity=config.use_salinity, filepath_s=config.filepath_s_test,
-            variable_names=[config.varname_t, config.varname_s],
-            T_range=config.T_range, S_range=config.S_range,
-            conditioning_configs=config.conditioning_configs,
-            co2_filepath=config.co2_filepath, co2_varname=config.co2_varname, co2_range=config.co2_range
+            config,
+            time_range=sample_day,
+            is_test_data=True
         )
         true_sample = true_sample.to(config.device)
         land_mask_global = land_mask.to(config.device)
