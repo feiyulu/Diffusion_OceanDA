@@ -32,8 +32,7 @@
         "co2": {"dim": 64}
     },
 
-    "use_2d_location_embedding": true,
-    "use_coriolis_embedding": true,
+    location_embedding_types=["lat", "lon_cyclical", "cos_lat", "coriolis", "ocean_depth"],
 
     "co2_filepath": "/scratch/cimes/feiyul/Ocean_Data/obs_data/co2_daily.nc",
     "co2_varname": "co2",

@@ -16,6 +16,7 @@ class Config:
         filepath_s=None,
         filepath_t_test=None,
         filepath_s_test=None,
+        filepath_static=None,
         varname_t='sst',
         varname_s='sss',
 
@@ -65,9 +66,9 @@ class Config:
         co2_varname='co2',
         co2_range=[320,450],
 
-        use_2d_location_embedding=False,
-        use_coriolis_embedding=False,
-        use_cyclical_lon_embedding=False,
+        location_embedding_types=[
+            "lat", "lon_cyclical", "cos_lat", "coriolis", "ocean_depth"
+            ],
 
         # --- Sampling Parameters ---
         load_model_for_sampling=False,
@@ -92,6 +93,7 @@ class Config:
         self.filepath_s = filepath_s if self.use_salinity else None
         self.filepath_t_test = filepath_t_test
         self.filepath_s_test = filepath_s_test if self.use_salinity else None
+        self.filepath_static = filepath_static
         self.varname_t = varname_t
         self.varname_s = varname_s if self.use_salinity else None
         self.lat_range = lat_range
@@ -136,17 +138,18 @@ class Config:
         self.co2_varname = co2_varname
         self.co2_range = co2_range
 
-        self.use_2d_location_embedding = use_2d_location_embedding    
-        self.use_coriolis_embedding = use_coriolis_embedding
-        self.use_cyclical_lon_embedding = use_cyclical_lon_embedding
+        self.location_embedding_types = location_embedding_types
         
-        # Dynamically calculate the number of location embedding channels based on flags.
+        # Dynamically calculate the number of location embedding channels based on the list.
         self.location_embedding_channels = 0
-        if self.use_2d_location_embedding:
-            # Lat channel + Lon channel(s)
-            self.location_embedding_channels += 1 + (2 if self.use_cyclical_lon_embedding else 1)
-        if self.use_coriolis_embedding:
-            self.location_embedding_channels += 1
+        if self.location_embedding_types:
+            if "lat" in self.location_embedding_types: self.location_embedding_channels += 1
+            if "lon" in self.location_embedding_types: self.location_embedding_channels += 1
+            if "lon_cyclical" in self.location_embedding_types: self.location_embedding_channels += 2
+            if "cos_lat" in self.location_embedding_types: self.location_embedding_channels += 1
+            if "coriolis" in self.location_embedding_types: self.location_embedding_channels += 1
+            if "ocean_depth" in self.location_embedding_types: self.location_embedding_channels += 1
+            if "grid_area" in self.location_embedding_types: self.location_embedding_channels += 1
  
         # --- Store Sampling Settings ---
         self.load_model_for_sampling = load_model_for_sampling
@@ -166,8 +169,8 @@ class Config:
         self.sample_plot_dir = f"{self.output_dir}/sample_plots"
         os.makedirs(self.sample_plot_dir, exist_ok=True)
 
-        self.generate_training_animation = False if self.load_model_for_sampling else True
         self.training_animation_path = f"{self.output_dir}/training_data_animation_{self.test_id}.gif"
+        self.generate_training_animation = False if os.path.exists(self.training_animation_path) else True
 
     @classmethod
     def from_json_file(cls, filepath):

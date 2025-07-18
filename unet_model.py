@@ -238,7 +238,6 @@ class UNet(nn.Module):
                  base_channels=32,
                  time_embedding_dim=256,
                  conditioning_configs={},
-                 use_2d_location_embedding=False,
                  location_embedding_channels=2,
                  channel_multipliers=(1, 2, 4, 8),
                  num_res_blocks=2,
@@ -247,7 +246,6 @@ class UNet(nn.Module):
                  verbose_init=False):
         super().__init__()
 
-        self.use_2d_location_embedding = use_2d_location_embedding
         self.location_embedding_channels = location_embedding_channels
         self.conditioning_configs = conditioning_configs
 
@@ -272,7 +270,7 @@ class UNet(nn.Module):
         self.context_dim = total_condition_dim
 
         # 3. Initial convolution (handles concatenated location embedding)
-        initial_conv_in_channels = in_channels + (location_embedding_channels if use_2d_location_embedding else 0)
+        initial_conv_in_channels = in_channels + location_embedding_channels
         self.initial_conv = PartialConv2d(initial_conv_in_channels, base_channels, kernel_size=3, padding=1)
 
         # 4. Downsampling path
@@ -320,7 +318,7 @@ class UNet(nn.Module):
         current_x, current_mask = x, mask
 
         # Concatenate location embedding if used
-        if self.use_2d_location_embedding and location_field is not None:
+        if self.location_embedding_channels > 0 and location_field is not None:
             current_x = torch.cat((current_x, location_field), dim=1)
             current_mask = mask.repeat(1, current_x.shape[1], 1, 1)
         

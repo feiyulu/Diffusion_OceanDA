@@ -93,36 +93,54 @@ def load_ocean_data(config, time_range, is_test_data=False):
         co2_normalized = (co2_da.values - config.co2_range[0]) / (config.co2_range[1] - config.co2_range[0])
         conditional_data['co2'] = torch.tensor(co2_normalized, dtype=torch.float32)
 
-    # --- Load and Prepare Spatial/Location Embedding ---
-    # This embedding provides the model with explicit coordinate information.
-    ds_ref = xr.open_mfdataset(filepath_t, combine='by_coords')
-    actual_lats = ds_ref.lat.isel(lat=slice(config.lat_range[0], config.lat_range[1])).values
-    actual_lons = ds_ref.lon.isel(lon=slice(config.lon_range[0], config.lon_range[1])).values
-    lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons, indexing='ij')
+    location_field_tensor = None
+    if config.location_embedding_channels > 0:
+        print(f"Generating location embeddings for: {config.location_embedding_types}")
+        location_channels = []
+        
+        # # Load static grid file which may contain geolat, geolon, depth, etc.
+        # static_ds = xr.open_dataset(config.filepath_static)
+        # lat_grid = static_ds['geolat'].isel(yh=slice(config.lat_range[0], config.lat_range[1]), xh=slice(config.lon_range[0], config.lon_range[1])).values
+        # lon_grid = static_ds['geolon'].isel(yh=slice(config.lat_range[0], config.lat_range[1]), xh=slice(config.lon_range[0], config.lon_range[1])).values
 
-    # Create a list to hold the different location channels
-    location_channels = []
-    
-    # Add normalized latitude
-    normalized_lat_grid = (lat_grid / 90.0).astype(np.float32)
-    location_channels.append(normalized_lat_grid)
+        # This embedding provides the model with explicit coordinate information.
+        ds_ref = xr.open_mfdataset(filepath_t[0])
+        actual_lats = ds_ref.lat.isel(lat=slice(config.lat_range[0], config.lat_range[1])).values
+        actual_lons = ds_ref.lon.isel(lon=slice(config.lon_range[0], config.lon_range[1])).values
+        lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons, indexing='ij')
 
-    # Add longitude (either linear or cyclical sin/cos)
-    if config.use_cyclical_lon_embedding:
-        lon_rad = (lon_grid / 360.0) * (2 * np.pi)
-        location_channels.append(np.sin(lon_rad).astype(np.float32))
-        location_channels.append(np.cos(lon_rad).astype(np.float32))
-    else:
-        normalized_lon_grid = ((lon_grid / 180.0) - 1.0).astype(np.float32)
-        location_channels.append(normalized_lon_grid)
+        # Build the embedding tensor channel by channel based on the config list
+        if "lat" in config.location_embedding_types:
+            location_channels.append((lat_grid / 90.0).astype(np.float32))
 
-    # Add Coriolis parameter if enabled
-    if config.use_coriolis_embedding:
-        omega = 7.2921e-5 # Earth's rotation rate in rad/s
-        lat_rad = np.deg2rad(lat_grid)
-        coriolis_f = 2 * omega * np.sin(lat_rad)
-        normalized_coriolis = (coriolis_f / (2 * omega)).astype(np.float32)
-        location_channels.append(normalized_coriolis)
+        if "lon" in config.location_embedding_types:
+            location_channels.append(((lon_grid / 180.0) - 1.0).astype(np.float32))
+
+        if "lon_cyclical" in config.location_embedding_types:
+            lon_rad = (lon_grid / 360.0) * (2 * np.pi)
+            location_channels.append(np.sin(lon_rad).astype(np.float32))
+            location_channels.append(np.cos(lon_rad).astype(np.float32))
+
+        if "cos_lat" in config.location_embedding_types:
+            lat_rad = np.deg2rad(lat_grid)
+            location_channels.append(np.cos(lat_rad).astype(np.float32))
+
+        if "coriolis" in config.location_embedding_types:
+            omega = 7.2921e-5
+            lat_rad = np.deg2rad(lat_grid)
+            coriolis_f = 2 * omega * np.sin(lat_rad)
+            location_channels.append((coriolis_f / (2 * omega)).astype(np.float32))
+
+        if "ocean_depth" in config.location_embedding_types:
+            depth = static_ds['wet'].isel(yh=slice(config.lat_range[0], config.lat_range[1]), xh=slice(config.lon_range[0], config.lon_range[1])).values
+            # Normalize by a typical max depth
+            normalized_depth = (depth / 6000.0).astype(np.float32)
+            location_channels.append(normalized_depth)
+        
+        # Stack the generated channels into a single tensor
+        location_field_single_sample = np.stack(location_channels, axis=0)
+        location_field_tensor = torch.tensor(location_field_single_sample, dtype=torch.float32).unsqueeze(0)
+        print(f"Location embedding created with shape: {location_field_tensor.shape}")
 
     # Stack the channels into a single tensor
     location_field_single_sample = np.stack(location_channels, axis=0)
