@@ -50,6 +50,12 @@ class Config:
         save_model_after_training=True,
         save_interval=10,
 
+        # --- Experiment Tracking (Weights & Biases) ---
+        use_wandb=False,
+        wandb_project="diffusion_ocean_da",
+        wandb_entity="feiyulu-princeton",
+        wandb_offline=False,
+
         # --- Conditioning Parameters ---
         conditioning_configs={
             "dayofyear": {"dim": 64},
@@ -117,6 +123,12 @@ class Config:
         self.validation_split = validation_split
         self.save_model_after_training = save_model_after_training
         self.save_interval = save_interval
+
+        # --- Store Experiment Tracking Settings ---
+        self.use_wandb = use_wandb
+        self.wandb_project = wandb_project
+        self.wandb_entity = wandb_entity
+        self.wandb_offline=wandb_offline,
 
         # --- Store Conditioning Settings ---
         self.conditioning_configs = conditioning_configs

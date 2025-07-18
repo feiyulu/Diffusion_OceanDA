@@ -10,6 +10,8 @@ import os # Import the os module for path operations
 import imageio # For creating GIF animations
 from torch.utils.data import DataLoader, random_split # Import random_split
 
+import wandb
+
 # Import components from other files
 from unet_model import UNet, count_parameters # count_parameters imported for model size
 from diffusion_process import Diffusion # Already imported
@@ -21,7 +23,8 @@ def train_diffusion_model(
     start_epoch=0,
     # NEW: use_... flags are no longer needed here, the model knows from its config
     save_interval=10, checkpoint_dir="checkpoints",
-    test_id="default_test", channels=1, loss_plot_dir="loss_plots"
+    test_id="default_test", channels=1, loss_plot_dir="loss_plots",
+    config=None
     ):
     """ Trains the diffusion U-Net model. """
     model.train()
@@ -97,6 +100,16 @@ def train_diffusion_model(
         val_losses.append(avg_val_loss)
         print(f"Epoch {epoch+1} finished, Average Validation Loss: {avg_val_loss:.4f}")
 
+        if config and config.use_wandb:
+            log_dict = {
+                "epoch": epoch + 1,
+                "train_loss": avg_train_loss,
+                "val_loss": avg_val_loss,
+            }
+            if scheduler is not None:
+                log_dict["learning_rate"] = scheduler.get_last_lr()[0]
+            wandb.log(log_dict)
+            
         # Step the learning rate scheduler ---
         if scheduler is not None:
             scheduler.step()

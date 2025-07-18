@@ -12,6 +12,8 @@ import argparse
 import imageio # For creating GIF animations
 from torch.utils.data import DataLoader, random_split # Import random_split
 
+import wandb
+
 # Import components from other files
 from config import Config # Already imported
 from data_utils import load_ocean_data # Already imported
@@ -48,6 +50,19 @@ if __name__ == "__main__":
     except FileNotFoundError as e:
         print(e)
         raise Exception("Please ensure 'config.json' exists")
+
+    if config.use_wandb:
+        # Set the mode to 'offline' if the config flag is True
+        mode = "offline" if config.wandb_offline else "online"
+        wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            config=vars(config), # Log all config parameters automatically
+            mode=mode
+        )
+        # Give the run a more descriptive name
+        wandb.run.name = config.test_id
+        print(f"Weights & Biases initialized in '{mode}' mode.")
 
     print(f"Using device: {config.device}")
     print(f"Model will use {config.channels} channel(s). Salinity included: {config.use_salinity}")
@@ -120,6 +135,9 @@ if __name__ == "__main__":
         location_embedding_channels=config.location_embedding_channels
     ).to(config.device)
 
+    if config.use_wandb:
+        wandb.watch(model, log='all', log_freq=200)
+
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     # Initialize the Learning Rate Scheduler ---
     scheduler = None
@@ -190,7 +208,8 @@ if __name__ == "__main__":
             checkpoint_dir=config.model_checkpoint_dir, 
             test_id=config.test_id,
             channels=config.channels,
-            loss_plot_dir=config.loss_plot_dir
+            loss_plot_dir=config.loss_plot_dir,
+            config=config
             )
 
         # Save model after training if configured
@@ -457,3 +476,6 @@ if __name__ == "__main__":
     if not config.use_salinity:
         print("Salinity plots were skipped as 'use_salinity' is set to False in config.")
     print("Land regions (where the mask is 0) are shown as masked areas in the plots, indicating no data.")
+
+    if config.use_wandb:
+        wandb.finish()
