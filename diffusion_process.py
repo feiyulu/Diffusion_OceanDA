@@ -58,9 +58,9 @@ class DPMSolver:
         return x_t
 
 class Diffusion:
-    def __init__(self, timesteps, beta_start, beta_end, img_size, device):
+    def __init__(self, timesteps, beta_start, beta_end, data_shape, device):
         self.timesteps = timesteps
-        self.img_h, self.img_w = img_size
+        self.data_d, self.data_h, self.data_w = data_shape
         self.device = device
 
         self.betas = self.prepare_noise_schedule(beta_start, beta_end).to(device)
@@ -81,35 +81,51 @@ class Diffusion:
         return torch.linspace(_beta_start, _beta_end, self.timesteps)
 
     def noise_images(self, x_0, t, mask_in):
-        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t, None, None, None]
-        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t, None, None, None]
+        """
+        Takes an original 3D volume x_0 and a timestep t, and returns a noisy version x_t and the noise added.
+        """
+        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t, None, None, None, None]
+        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t, None, None, None, None]
+        
         epsilon = torch.randn_like(x_0)
-        mask_expanded = mask_in.float().repeat(1, x_0.shape[1], 1, 1)
+        mask_expanded = mask_in.float().repeat(1, x_0.shape[1], 1, 1, 1)
+        
         masked_epsilon = epsilon * mask_expanded
         masked_x_0 = x_0 * mask_expanded
+
         x_t = sqrt_alpha_cumprod_t * masked_x_0 + sqrt_one_minus_alpha_cumprod_t * masked_epsilon
         x_t = x_t * mask_expanded
         return x_t, masked_epsilon
 
     def predict_x0_from_noise(self, x_t, t, epsilon_pred, mask_in):
-        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t, None, None, None]
-        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t, None, None, None]
-        mask_expanded = mask_in.float().repeat(1, x_t.shape[1], 1, 1)
+        """
+        Estimates the original clean 3D volume (x_0) from a noisy volume (x_t)
+        and the predicted noise (epsilon_pred).
+        """
+        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t, None, None, None, None]
+        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t, None, None, None, None]
+        
+        mask_expanded = mask_in.float().repeat(1, x_t.shape[1], 1, 1, 1)
         masked_epsilon_pred = epsilon_pred * mask_expanded
+
         predicted_x0 = (x_t - sqrt_one_minus_alpha_cumprod_t * masked_epsilon_pred) / sqrt_alpha_cumprod_t
         predicted_x0 = predicted_x0 * mask_expanded
         return predicted_x0
 
     @torch.no_grad()
     def p_sample(self, model, x, t, t_index, mask_in):
+        # This function uses scalar broadcasting, so it's already compatible with 3D.
         betas_t = self.betas[t_index]
         sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t_index]
         sqrt_recip_alphas_t = self.sqrt_recip_alphas[t_index]
+        
         model_output_noise = model(x, t, mask_in)
-        mask_expanded = mask_in.float().repeat(1, x.shape[1], 1, 1)
+        mask_expanded = mask_in.float().repeat(1, x.shape[1], 1, 1, 1)
         model_output_noise = model_output_noise * mask_expanded
+
         model_mean = sqrt_recip_alphas_t * (x - betas_t * model_output_noise / sqrt_one_minus_alphas_cumprod_t)
         model_mean = model_mean * mask_expanded
+
         if t_index == 0:
             return model_mean
         else:
@@ -120,41 +136,24 @@ class Diffusion:
     @torch.no_grad()
     def ddim_sample(self, x_t, t, t_prev, x_0_pred, mask_in, eta=0.0):
         """
-        Performs one step of the reverse diffusion (denoising) process using DDIM.
-        This version accepts the predicted x0 to be more efficient and avoid redundant model calls.
-        
-        Args:
-            x_t (torch.Tensor): The current noisy image.
-            t (torch.Tensor): The current timestep tensor.
-            t_prev (int): The previous timestep index.
-            x_0_pred (torch.Tensor): The predicted clean image from the model (after guidance).
-            mask_in (torch.Tensor): The land mask.
-            eta (float): Controls the stochasticity of the sampling. 0.0 for deterministic DDIM.
+        Performs one step of the DDIM reverse process for 3D data.
         """
-        # Get parameters for current and previous timesteps
-        alpha_bar_t = self.alphas_cumprod[t, None, None, None]
-        alpha_bar_prev_t = self.alphas_cumprod[t_prev, None, None, None] if t_prev >= 0 else torch.tensor(1.0).to(self.device)
+        alpha_bar_t = self.alphas_cumprod[t, None, None, None, None]
+        alpha_bar_prev_t = self.alphas_cumprod[t_prev, None, None, None, None] if t_prev >= 0 else torch.tensor(1.0).to(self.device)
         
-        # Calculate the predicted noise from the guided x0
-        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t, None, None, None]
-        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t, None, None, None]
+        sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t, None, None, None, None]
+        sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t, None, None, None, None]
         predicted_noise = (x_t - sqrt_alpha_cumprod_t * x_0_pred) / sqrt_one_minus_alpha_cumprod_t
         
-        mask_expanded = mask_in.float().repeat(1, x_t.shape[1], 1, 1)
+        mask_expanded = mask_in.float().repeat(1, x_t.shape[1], 1, 1, 1)
         predicted_noise *= mask_expanded
 
-        # Calculate sigma_t, the standard deviation of the noise term
         sigma_t = eta * torch.sqrt(
             (1 - alpha_bar_prev_t) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev_t)
         )
 
-        # The direction pointing to x_t
         direction_pointing_to_xt = torch.sqrt(1 - alpha_bar_prev_t - sigma_t**2) * predicted_noise
-
-        # The random noise term
         noise = torch.randn_like(x_t) * mask_expanded if t_prev >= 0 else torch.zeros_like(x_t)
-
-        # The full DDIM equation for x_{t-1}
         x_prev = torch.sqrt(alpha_bar_prev_t) * x_0_pred + direction_pointing_to_xt + sigma_t * noise
         x_prev = x_prev * mask_expanded
 

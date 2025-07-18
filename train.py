@@ -173,12 +173,11 @@ if __name__ == "__main__":
     
     print(f"\nTotal trainable parameters in UNet model: {count_parameters(model):,}") # Print model size
 
-    # Pass image_size to Diffusion constructor
     diffusion = Diffusion(
         timesteps=config.timesteps, 
         beta_start=config.beta_start, 
         beta_end=config.beta_end, 
-        img_size=config.image_size, 
+        data_shape=config.data_shape, 
         device=config.device) # Instantiate the Diffusion utility
 
     # 3. Train the model (if not loading for sampling only)

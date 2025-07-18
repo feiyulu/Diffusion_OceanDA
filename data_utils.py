@@ -19,8 +19,8 @@ def load_ocean_data(config, time_range, is_test_data=False):
         tuple: (torch.Tensor, torch.Tensor, dict, torch.Tensor, list, list) -
                data_tensor, land_mask_tensor, conditional_data_dict, location_field_tensor, actual_T_range, actual_S_range.
     """
-    img_h, img_w = config.image_size
-    print(f"Loading real ocean data of size {img_h}x{img_w} with {config.channels} channel(s)...")
+    data_d, data_h, data_w = config.data_shape
+    print(f"Loading 3D ocean data of size {data_d}x{data_h}x{data_w} with {config.channels} channel(s)...")
 
     # Select filepaths based on whether this is for training or testing/validation
     filepath_t = config.filepath_t_test if is_test_data else config.filepath_t
@@ -36,15 +36,21 @@ def load_ocean_data(config, time_range, is_test_data=False):
         """Loads, slices, normalizes, and masks a single data variable."""
         # Load dataset, handling multiple files if necessary
         ds = xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True)
+        if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
+            ds = ds.rename({config.varname_lat:'lat',config.varname_lon:'lon'})
         da = ds[varname]
 
         # Slice data based on the provided time, latitude, and longitude ranges
         if len(time_range)==2:
             da_sliced = da.sel(time=slice(time_range[0], time_range[1], config.training_day_interval)).isel(
-                lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1]))
+                z=slice(config.depth_range[0], config.depth_range[1]),
+                lat=slice(config.lat_range[0], config.lat_range[1]), 
+                lon=slice(config.lon_range[0], config.lon_range[1]))
         elif len(time_range)==1:
             da_sliced = da.isel(time=time_range).isel(
-                lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1]))
+                z=slice(config.depth_range[0], config.depth_range[1]),
+                lat=slice(config.lat_range[0], config.lat_range[1]), 
+                lon=slice(config.lon_range[0], config.lon_range[1]))
         
         # Convert to numpy array and create a mask from NaNs
         data_np = da_sliced.values.astype(np.float32)
@@ -105,6 +111,8 @@ def load_ocean_data(config, time_range, is_test_data=False):
 
         # This embedding provides the model with explicit coordinate information.
         ds_ref = xr.open_mfdataset(filepath_t[0])
+        if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
+            ds_ref = ds_ref.rename({config.varname_lat:'lat',config.varname_lon:'lon'})
         actual_lats = ds_ref.lat.isel(lat=slice(config.lat_range[0], config.lat_range[1])).values
         actual_lons = ds_ref.lon.isel(lon=slice(config.lon_range[0], config.lon_range[1])).values
         lat_grid, lon_grid = np.meshgrid(actual_lats, actual_lons, indexing='ij')
@@ -152,11 +160,11 @@ def load_ocean_data(config, time_range, is_test_data=False):
     data_tensor = torch.tensor(np.stack(data_vars, axis=1), dtype=torch.float32)
     
     # Combine the masks from all variables to create a final land mask
-    combined_land_mask_np = (land_mask_temp * land_mask_sal).astype(np.float32)
-    land_mask_tensor = torch.tensor(combined_land_mask_np[None, None, :, :], dtype=torch.float32)
+    combined_mask_np = (land_mask_temp * land_mask_sal).astype(np.float32)
+    land_mask_tensor = torch.tensor(combined_mask_np[np.newaxis, np.newaxis, :, :, :], dtype=torch.float32)
     
     # Ensure all data points on land are zeroed out
-    full_mask_expanded = land_mask_tensor.repeat(data_tensor.shape[0], data_tensor.shape[1], 1, 1)
+    full_mask_expanded = land_mask_tensor.repeat(1, data_tensor.shape[1], 1, 1, 1)
     data_tensor = data_tensor * full_mask_expanded
 
     print(f"Loaded and normalized data shape: {data_tensor.shape}")

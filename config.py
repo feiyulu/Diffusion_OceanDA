@@ -8,7 +8,7 @@ class Config:
     def __init__(
         self,
         test_id,
-        image_size=(128, 128),
+        data_shape=(25, 128, 128),
         use_salinity=False,
 
         # --- File Paths and Variable Names ---
@@ -17,10 +17,13 @@ class Config:
         filepath_t_test=None,
         filepath_s_test=None,
         filepath_static=None,
-        varname_t='sst',
-        varname_s='sss',
+        varname_t='T',
+        varname_s='S',
+        varname_lat='lat',
+        varname_lon='lon',
 
         # --- Data Slicing and Subsetting ---
+        depth_range=[0,25],
         lat_range=[26,154],
         lon_range=[120,248],
         training_years=[2013, 2014],
@@ -90,7 +93,7 @@ class Config:
         
         # --- Basic Setup ---
         self.test_id = test_id
-        self.image_size = image_size
+        self.data_shape = data_shape
         self.use_salinity = use_salinity
         self.channels = 2 if self.use_salinity else 1
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -111,6 +114,10 @@ class Config:
         self.filepath_static = filepath_static
         self.varname_t = varname_t
         self.varname_s = varname_s if self.use_salinity else None
+        self.varname_lat = varname_lat
+        self.varname_lon = varname_lon
+
+        self.depth_range = depth_range
         self.lat_range = lat_range
         self.lon_range = lon_range
         self.training_day_range=[f"{training_years[0]}0101",f"{training_years[1]}1231"]
@@ -145,7 +152,7 @@ class Config:
         self.use_wandb = use_wandb
         self.wandb_project = wandb_project
         self.wandb_entity = wandb_entity
-        self.wandb_offline=wandb_offline,
+        self.wandb_offline = wandb_offline
 
         # --- Store Conditioning Settings ---
         self.conditioning_configs = conditioning_configs
@@ -194,15 +201,15 @@ class Config:
             raise FileNotFoundError(f"Config file not found: {filepath}")
         with open(filepath, 'r') as f:
             settings = json.load(f)
-        if 'image_size' in settings and isinstance(settings['image_size'], list):
-            settings['image_size'] = tuple(settings['image_size'])
+        if 'data_shape' in settings and isinstance(settings['data_shape'], list):
+            settings['data_shape'] = tuple(settings['data_shape'])
         return cls(**settings)
 
     def to_json_file(self, filepath):
         """Saves the current configuration settings to a JSON file."""
         settings = self.__dict__.copy()
-        if isinstance(settings.get('image_size'), tuple):
-            settings['image_size'] = list(settings['image_size'])
+        if isinstance(settings.get('data_shape'), tuple):
+            settings['data_shape'] = list(settings['data_shape'])
         if 'device' in settings:
             del settings['device']
         for key in ['model_checkpoint_dir','loss_plot_dir','sample_plot_dir','training_animation_path']:

@@ -42,7 +42,7 @@ def train_diffusion_model(
         # NEW: The data loader now yields a dictionary of conditions
         for batch_idx, (x_0, conditions_batch, location_field_batch) in enumerate(pbar):
             x_0 = x_0.to(device)
-            current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1)
+            current_land_mask = land_mask.repeat(x_0.shape[0], 1, 1, 1, 1)
             t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=device).long()
             x_t, true_epsilon = diffusion.noise_images(x_0, t, current_land_mask)
             
