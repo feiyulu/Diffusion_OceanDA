@@ -55,7 +55,7 @@ print(f"Original vertical levels: {len(model_dz)}. Coarsened vertical levels: {l
 
 # --- Main Processing Loop ---
 # Loop through the specified year(s) to process the data.
-for year in range(2020, 2021):
+for year in range(2021, 2025):
     print(f"\nProcessing data for year: {year}...")
 
     # Load the 3D temperature data for the entire year.

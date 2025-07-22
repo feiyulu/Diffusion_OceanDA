@@ -16,11 +16,13 @@ class Config:
         filepath_s=None,
         filepath_t_test=None,
         filepath_s_test=None,
-        filepath_static=None,
+        filepath_static=None, # Used for grid info and static fields like ocean depth
+        filepath_mask=None,
         varname_t='T',
         varname_s='S',
         varname_lat='lat',
         varname_lon='lon',
+        mask_varname='wet', # Variable name for the land/ocean mask in the static file
 
         # --- Data Slicing and Subsetting ---
         depth_range=[0,25],
@@ -40,19 +42,25 @@ class Config:
 
         # --- U-Net Architecture ---
         base_unet_channels=32,
+        channel_multipliers=(1, 2, 4, 8),
+        attn_resolutions=(8,), # Resolutions at which to use attention blocks
+        num_res_blocks=2,
 
         # --- Training Parameters ---
         epochs=100,
         batch_size=200,
         learning_rate=1e-4,
+        use_checkpointing=False,
+        use_amp=False,
+
         use_lr_scheduler=True,
         lr_scheduler_T_max=100,
         lr_scheduler_eta_min=1e-6, 
         gradient_accumulation_steps=1,
-        channel_wise_normalization=True,
         validation_split=0.1,
         save_model_after_training=True,
         save_interval=10,
+        dropout_prob=0.1,
 
         # --- Experiment Tracking (Weights & Biases) ---
         use_wandb=False,
@@ -74,21 +82,23 @@ class Config:
             ],
 
         # --- Sampling Parameters ---
-        load_model_for_sampling=False,
         sampling_method='ddpm',
         ensemble_size=1,
-        sampling_steps=20,
+        sampling_steps=20, # Only for accelerated samplers like DPM-Solver
         ddim_eta=0.0,
         observation_fidelity_weight=1.0,
 
-        use_real_observations=False,
+        # --- Observation Settings ---
+        use_real_observations=False, # Flag to switch between synthetic and real observations
         observation_path_template="/path/to/obs_data/argo/argo_{year}_interp.nc",
         observation_time_window_days=3,
         observation_operator="nearest_neighbor",
+        observation_samples=[1000], # Number of synthetic observations if not using real ones
 
-        observation_samples=[1000],
+        # --- Evaluation Settings ---
         sample_years=[2024,2025],
-        sample_days=[[0]],
+        sample_days=[[0]], # Day of the year (0-364) for sampling
+        generate_training_animation=True, # Explicit flag to control animation generation
         ):
         
         # --- Basic Setup ---
@@ -104,16 +114,19 @@ class Config:
         ]
         self.filepath_s = [
             filepath_s.format(year=year) for year in range(training_years[0],training_years[1]+1)
-        ] if self.use_salinity else None
+        ] if self.use_salinity and filepath_s else None
         self.filepath_t_test = [
             filepath_t_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)
         ]
         self.filepath_s_test = [
             filepath_s_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)
-        ] if self.use_salinity else None
+        ] if self.use_salinity and filepath_s_test else None
+        
         self.filepath_static = filepath_static
+        self.filepath_mask = filepath_mask
+        self.mask_varname = mask_varname
         self.varname_t = varname_t
-        self.varname_s = varname_s if self.use_salinity else None
+        self.varname_s = varname_s
         self.varname_lat = varname_lat
         self.varname_lon = varname_lon
 
@@ -124,26 +137,34 @@ class Config:
         self.training_day_interval = training_day_interval
         self.sample_days = sample_days
         self.T_range = T_range
-        self.S_range = S_range if self.use_salinity else None
+        self.S_range = S_range
 
         # --- Output Directory Management ---
-        self.output_dir = f"/scratch/cimes/feiyul/Diffusion_OceanDA/{self.test_id}"
+        self.scratch_dir = "/scratch/cimes/feiyul/Diffusion_OceanDA"
+        self.output_dir = f"{self.scratch_dir}/{self.test_id}"
         if not os.path.isdir(self.output_dir):
-            os.mkdir(self.output_dir)
+            os.makedirs(self.output_dir, exist_ok=True)
 
         # --- Store Model and Training Settings ---
         self.timesteps = timesteps
         self.beta_start = beta_start
         self.beta_end = beta_end
         self.base_unet_channels = base_unet_channels
+        self.channel_multipliers = channel_multipliers
+        self.attn_resolutions = attn_resolutions
+        self.num_res_blocks = num_res_blocks
+        self.dropout_prob = dropout_prob
+
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.use_checkpointing = use_checkpointing
+        self.use_amp = use_amp
+
         self.use_lr_scheduler = use_lr_scheduler
         self.lr_scheduler_T_max = lr_scheduler_T_max if lr_scheduler_T_max is not None else epochs
         self.lr_scheduler_eta_min = lr_scheduler_eta_min
         self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.channel_wise_normalization = channel_wise_normalization
         self.validation_split = validation_split
         self.save_model_after_training = save_model_after_training
         self.save_interval = save_interval
@@ -165,25 +186,27 @@ class Config:
         # Dynamically calculate the number of location embedding channels based on the list.
         self.location_embedding_channels = 0
         if self.location_embedding_types:
-            if "lat" in self.location_embedding_types: self.location_embedding_channels += 1
-            if "lon" in self.location_embedding_types: self.location_embedding_channels += 1
-            if "lon_cyclical" in self.location_embedding_types: self.location_embedding_channels += 2
-            if "cos_lat" in self.location_embedding_types: self.location_embedding_channels += 1
-            if "coriolis" in self.location_embedding_types: self.location_embedding_channels += 1
-            if "ocean_depth" in self.location_embedding_types: self.location_embedding_channels += 1
-            if "grid_area" in self.location_embedding_types: self.location_embedding_channels += 1
+            type_counts = {
+                "lat": 1, "lon": 1, "lon_cyclical": 2, "cos_lat": 1,
+                "coriolis": 1, "ocean_depth": 1, "grid_area": 1
+            }
+            for emb_type in self.location_embedding_types:
+                self.location_embedding_channels += type_counts.get(emb_type, 0)
  
         # --- Store Sampling Settings ---
-        self.load_model_for_sampling = load_model_for_sampling
         self.sampling_method = sampling_method
         self.ensemble_size = ensemble_size
         self.sampling_steps = sampling_steps
         self.ddim_eta = ddim_eta
         self.observation_fidelity_weight = observation_fidelity_weight
         self.observation_samples = observation_samples
+        self.use_real_observations = use_real_observations
+        self.observation_path_template = observation_path_template
+        self.observation_time_window_days = observation_time_window_days
+        self.observation_operator = observation_operator
+
 
         # --- Dynamically Generated Paths ---
-        # These paths are constructed based on the test_id and other settings.
         self.model_checkpoint_dir = f"{self.output_dir}/checkpoints"
         os.makedirs(self.model_checkpoint_dir, exist_ok=True)
         self.loss_plot_dir = f"{self.output_dir}/loss_plots"
@@ -192,7 +215,7 @@ class Config:
         os.makedirs(self.sample_plot_dir, exist_ok=True)
 
         self.training_animation_path = f"{self.output_dir}/training_data_animation_{self.test_id}.gif"
-        self.generate_training_animation = False if os.path.exists(self.training_animation_path) else True
+        self.generate_training_animation = generate_training_animation
 
     @classmethod
     def from_json_file(cls, filepath):
@@ -201,20 +224,27 @@ class Config:
             raise FileNotFoundError(f"Config file not found: {filepath}")
         with open(filepath, 'r') as f:
             settings = json.load(f)
-        if 'data_shape' in settings and isinstance(settings['data_shape'], list):
-            settings['data_shape'] = tuple(settings['data_shape'])
+        for key in ['data_shape', 'channel_multipliers', 'attn_resolutions']:
+            if key in settings and isinstance(settings[key], list):
+                settings[key] = tuple(settings[key])
         return cls(**settings)
 
     def to_json_file(self, filepath):
         """Saves the current configuration settings to a JSON file."""
         settings = self.__dict__.copy()
-        if isinstance(settings.get('data_shape'), tuple):
-            settings['data_shape'] = list(settings['data_shape'])
-        if 'device' in settings:
-            del settings['device']
-        for key in ['model_checkpoint_dir','loss_plot_dir','sample_plot_dir','training_animation_path']:
+        non_serializable_keys = [
+            'device', 'model_checkpoint_dir', 'loss_plot_dir', 
+            'sample_plot_dir', 'training_animation_path'
+        ]
+        for key in non_serializable_keys:
             if key in settings:
                 del settings[key]
+        
+        # Convert tuples to lists for JSON compatibility
+        for key, value in settings.items():
+            if isinstance(value, tuple):
+                settings[key] = list(value)
+
         with open(filepath, 'w') as f:
             json.dump(settings, f, indent=4)
         print(f"Configuration saved to {filepath}")

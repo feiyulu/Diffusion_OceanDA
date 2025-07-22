@@ -1,49 +1,63 @@
 {
-    "test_id": "test2",
-    "image_size": [128, 128],
-    "use_salinity": false,
+    "test_id": "train2",
 
-    "filepath_t": ["/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2013.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2014.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2015.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2016.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2017.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2018.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2019.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2020.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2021.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2022.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2023.1x1.nc"],
-    "filepath_s": ["/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2013.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2014.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2015.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2016.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2017.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2018.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2019.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2020.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2021.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2022.1x1.nc", "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2023.1x1.nc"],
-    "filepath_t_test": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.2024.1x1.nc",
-    "filepath_s_test": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/SSS.day.2024.1x1.nc",
-    "varname_t": "sst",
-    "varname_s": "sss",
-    "lat_range": [26, 154],
-    "lon_range": [120, 248],
-    "training_day_range": ["20030101", "20031231"],
+    "data_shape": [10, 180, 360],
+    "use_salinity": false,
+    "filepath_t": "/scratch/cimes/feiyul/Ocean_Data/model_data/M9/T.{year}.nc",
+    "filepath_s": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/S.{year}.nc",
+    "filepath_t_test": "/scratch/cimes/feiyul/Ocean_Data/model_data/M9/T.{year}.nc",
+    "filepath_s_test": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sss/S.{year}.nc",
+    "filepath_static": "/scratch/cimes/feiyul/Ocean_Data/model_data/M9/ocean_z.static.nc",
+    "varname_t": "T",
+    "varname_s": "S",
+    "varname_lat": "yh",
+    "varname_lon": "xh",
+    "depth_range": [0, 10],
+    "lat_range": [0, 180],
+    "lon_range": [0, 360],
+    "training_years": [2020, 2020],
     "training_day_interval": 1,
-    
+
+    "T_range": [-2, 32],
+    "S_range": [32, 37],
+
     "timesteps": 1000,
-    "beta_start": 0.00001,
+    "beta_start": 1e-05,
     "beta_end": 0.01,
-    "base_unet_channels": 64,
+
+    "base_unet_channels": 16,
+
     "epochs": 100,
-    "batch_size": 32,
+    "batch_size": 8,
+    "learning_rate": 0.0001,
     "gradient_accumulation_steps": 4,
-    "learning_rate": 0.00001,
-    "channel_wise_normalization": true,
+    "use_lr_scheduler": true,
+    "lr_scheduler_T_max": 100,
+    "lr_scheduler_eta_min": 1e-06,
     "validation_split": 0.1,
     "save_model_after_training": true,
-    "save_interval": 10,
+    "save_interval": 20,
 
     "conditioning_configs": {
         "dayofyear": {"dim": 64},
         "co2": {"dim": 64}
     },
-
-    location_embedding_types=["lat", "lon_cyclical", "cos_lat", "coriolis", "ocean_depth"],
-
     "co2_filepath": "/scratch/cimes/feiyul/Ocean_Data/obs_data/co2_daily.nc",
     "co2_varname": "co2",
-    "co2_range": [320,450], 
+    "co2_range": [320, 450],
+    "location_embedding_types": ["lon_cyclical", "cos_lat", "coriolis"],
 
-    "load_model_for_sampling": false,
     "sampling_method": "ddpm",
     "ensemble_size": 20,
-    "ddim_eta": 1.0,
     "sampling_steps": 50,
+    "ddim_eta": 1.0,
     "observation_fidelity_weight": 1.0,
-    "observation_samples": [1],
-    "sample_days": [[0]]
+    "use_real_observations": false,
+    "observation_samples": [800],
+    "sample_years": [2020, 2020],
+    "sample_days": [[180]],
+
+    "use_wandb": false,
+    "wandb_project": "diffusion_oda_2D_train1",
+    "wandb_offline": true
 }
