@@ -124,63 +124,70 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
                 'train_losses': train_losses, 'val_losses': val_losses
             }, checkpoint_path)
             print("Checkpoint saved.")
-            # plot_losses(train_losses, val_losses, os.path.join(config.loss_plot_dir, f"loss_plot_{config.test_id}_epoch_{epoch+1}.png"))
+            plot_losses(train_losses, val_losses, os.path.join(config.loss_plot_dir, f"loss_plot_{config.test_id}_epoch_{epoch+1}.png"))
 
     return train_losses, val_losses
 
 # --- Animation Function for Training Data ---
-def create_training_animation(data_tensor, land_mask, config, save_path):
+def create_training_animation(data_tensor, land_mask, config):
     """
-    Creates a GIF animation of the surface layer of the 3D training data.
+    Creates GIF animations of the training data for specified depth levels.
     """
-    print(f"Creating training data animation and saving to {save_path}...")
-    frames = []
-    # Select the surface layer (depth index 0) for plotting
-    land_mask_np = land_mask[0, 0, 0].cpu().numpy() 
-
-    num_rows = config.channels
-    
-    # Limit number of frames to avoid excessively large GIFs
-    max_frames = 100
-    data_to_animate = data_tensor[:min(len(data_tensor), max_frames*5):5]
-
-    static_ds = xr.open_dataset(config.filepath_static)
-    if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
-        static_ds = static_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
-    lat_grid = static_ds['geolat'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
-    lon_grid = static_ds['geolon'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
-
-    for i, sample in enumerate(tqdm(data_to_animate, desc="Generating animation frames")):
-        # Select the surface layer (depth index 0) of the sample for plotting
-        sample_np_surface = sample[:, 0, :, :].cpu().numpy()
-
-        fig, axes = plt.subplots(
-            num_rows, 1, figsize=(8, 4 * num_rows), squeeze=False,
-            subplot_kw={'projection':ccrs.Robinson()})
-
-        for c in range(num_rows):
-            var_name = "Temperature" if c == 0 else "Salinity"
-            cmap = 'coolwarm' if c == 0 else 'plasma'
-            
-            ax = axes[c, 0]
-            masked_data = np.ma.masked_where(land_mask_np == 0, sample_np_surface[c])
-            im = ax.pcolormesh(
-                lon_grid,lat_grid,sample_np_surface[c],
-                cmap=cmap,vmin=0.,vmax=1.,transform=ccrs.PlateCarree())
-            ax.set_title(f'Sample {i+1} - Surface {var_name}')
-            ax.set_xlabel('Longitude Index'); ax.set_ylabel('Latitude Index')
-            plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-
-        plt.tight_layout()
+    # Loop through each depth level specified in the config
+    for depth_level in config.plot_depth_levels:
+        # Construct a unique filename for each depth level's animation
+        save_path = os.path.join(config.output_dir, f"training_animation_depth_{depth_level}.gif")
+        print(f"Creating training data animation for depth level {depth_level}...")
         
-        fig.canvas.draw()
-        image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
-        image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        frames.append(image)
-        plt.close(fig)
+        frames = []
+        # Select the 2D land mask for the current depth level
+        land_mask_np = land_mask[0, 0, depth_level].cpu().numpy() 
 
-    if frames:
-        imageio.mimsave(save_path, frames, fps=5)
-        print(f"Animation saved successfully to {save_path}")
-    else:
-        print("No frames were generated for the animation.")
+        num_rows = config.channels
+        
+        max_frames = 100
+        data_to_animate = data_tensor[:min(len(data_tensor), max_frames*5):5]
+
+        static_ds = xr.open_dataset(config.filepath_static)
+        if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
+            static_ds = static_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
+        lat_grid = static_ds['geolat'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
+        lon_grid = static_ds['geolon'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
+
+        for i, sample in enumerate(tqdm(data_to_animate, desc=f"Generating frames for depth {depth_level}")):
+            # Select the data for the current depth level
+            sample_np_level = sample[:, depth_level, :, :].cpu().numpy()
+
+            fig, axes = plt.subplots(
+                num_rows, 1, figsize=(8, 4 * num_rows), squeeze=False,
+                subplot_kw={'projection':ccrs.PlateCarree()})
+
+            for c in range(num_rows):
+                var_name = "Temperature" if c == 0 else "Salinity"
+                cmap = 'coolwarm' if c == 0 else 'plasma'
+                
+                ax = axes[c, 0]
+                masked_data = np.ma.masked_where(land_mask_np == 0, sample_np_level[c])
+                im = ax.pcolormesh(
+                    lon_grid,lat_grid,masked_data,
+                    cmap=cmap,vmin=0.,vmax=1.,transform=ccrs.PlateCarree())
+                ax.gridlines(
+                    crs=ccrs.PlateCarree(), draw_labels=True,linewidth=2, 
+                    color='gray', alpha=0.5, linestyle='--')
+                ax.coastlines()
+                ax.set_title(f'Sample {i+1} - Depth Idx {depth_level} - {var_name}')
+                plt.colorbar(im, ax=ax, label=f'Normalized {var_name}', orientation='horizontal', pad=0.1)
+
+            plt.tight_layout()
+            
+            fig.canvas.draw()
+            image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+            image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+            frames.append(image)
+            plt.close(fig)
+
+        if frames:
+            imageio.mimsave(save_path, frames, fps=5)
+            print(f"Animation for depth {depth_level} saved successfully to {save_path}")
+        else:
+            print(f"No frames were generated for depth level {depth_level}.")

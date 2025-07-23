@@ -52,6 +52,7 @@ class Config:
         learning_rate=1e-4,
         use_checkpointing=False,
         use_amp=False,
+        use_data_parallel=False,
 
         use_lr_scheduler=True,
         lr_scheduler_T_max=100,
@@ -98,7 +99,8 @@ class Config:
         # --- Evaluation Settings ---
         sample_years=[2024,2025],
         sample_days=[[0]], # Day of the year (0-364) for sampling
-        generate_training_animation=True, # Explicit flag to control animation generation
+        generate_training_animation=True,
+        plot_depth_levels=[0]
         ):
         
         # --- Basic Setup ---
@@ -160,6 +162,7 @@ class Config:
         self.learning_rate = learning_rate
         self.use_checkpointing = use_checkpointing
         self.use_amp = use_amp
+        self.use_data_parallel = use_data_parallel
 
         self.use_lr_scheduler = use_lr_scheduler
         self.lr_scheduler_T_max = lr_scheduler_T_max if lr_scheduler_T_max is not None else epochs
@@ -205,6 +208,11 @@ class Config:
         self.observation_time_window_days = observation_time_window_days
         self.observation_operator = observation_operator
 
+        # --- Store Evaluation Settings ---
+        self.sample_years = sample_years
+        self.sample_days = sample_days
+        self.generate_training_animation = generate_training_animation
+        self.plot_depth_levels = plot_depth_levels
 
         # --- Dynamically Generated Paths ---
         self.model_checkpoint_dir = f"{self.output_dir}/checkpoints"
@@ -215,7 +223,6 @@ class Config:
         os.makedirs(self.sample_plot_dir, exist_ok=True)
 
         self.training_animation_path = f"{self.output_dir}/training_data_animation_{self.test_id}.gif"
-        self.generate_training_animation = generate_training_animation
 
     @classmethod
     def from_json_file(cls, filepath):

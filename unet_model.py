@@ -146,7 +146,7 @@ class DownBlock(nn.Module):
     def forward(self, x, time_emb, mask, context=None, use_checkpointing=False):
         skip_outputs = []
         for res_block, (self_attn, cross_attn) in zip(self.res_blocks, self.attn_blocks):
-            # --- MEMORY SAVING: Apply gradient checkpointing here ---
+            # Apply gradient checkpointing here 
             if use_checkpointing:
                 x, mask = checkpoint(res_block, x, time_emb, mask)
             else:
@@ -216,7 +216,7 @@ class UNet(nn.Module):
         self.conditioning_configs = config.conditioning_configs
         self.verbose_init = verbose_init
         self.has_logged_forward = False
-        # --- MEMORY SAVING: Add flag for checkpointing ---
+        #  Add flag for checkpointing
         self.use_checkpointing = getattr(config, 'use_checkpointing', False)
         
         base_channels = config.base_unet_channels
@@ -247,8 +247,6 @@ class UNet(nn.Module):
         attn_resolutions = getattr(config, 'attn_resolutions', (16,))
         
         d, h, w = config.data_shape
-
-        # ... (verbose_init logic remains the same) ...
 
         for i, multiplier in enumerate(channel_multipliers):
             out_ch = base_channels * multiplier
@@ -314,7 +312,7 @@ class UNet(nn.Module):
         if should_log: print(f"Bottleneck Input:        {x.shape}")
         for layer in self.bottleneck:
             if isinstance(layer, ResidualBlock):
-                # --- MEMORY SAVING: Apply checkpointing to bottleneck ResBlocks ---
+                # --- Apply checkpointing to bottleneck ResBlocks ---
                 if self.use_checkpointing:
                     x, current_mask = checkpoint(layer, x, time_emb, current_mask)
                 else:

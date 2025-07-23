@@ -11,11 +11,6 @@ from tqdm import tqdm
 def plot_losses(train_losses, val_losses, save_path):
     """
     Plots the training and validation losses over epochs and saves the plot.
-
-    Args:
-        train_losses (list): List of training loss values per epoch.
-        val_losses (list): List of validation loss values per epoch.
-        save_path (str): Full path to save the loss plot image.
     """
     plt.figure(figsize=(10, 6))
     epochs_range = range(1, len(train_losses) + 1)
@@ -27,74 +22,61 @@ def plot_losses(train_losses, val_losses, save_path):
     plt.legend()
     plt.grid(True)
     plt.savefig(save_path)
-    plt.close() # Close the figure to free up memory
+    plt.close()
     print(f"Loss plot saved to {save_path}")
 
 
-def plot_ensemble_results_3d_surface(
+def plot_ensemble_results_3d(
     ensemble_mean, ensemble_spread, true_sample, clim_pred,
     obs_points_actual, land_mask_np, config, sample_day_datetime,
-    num_obs_points, select_size=None):
+    num_obs_points, depth_level, select_size=None):
     """
-    Visualizes the surface layer (z=0) of the 3D ensemble sampling results.
-
-    Args:
-        ensemble_mean (torch.Tensor): The mean of the ensemble members (C, D, H, W).
-        ensemble_spread (torch.Tensor): The std dev of the ensemble members (C, D, H, W).
-        true_sample (torch.Tensor): The ground truth data (C, D, H, W).
-        clim_pred (torch.Tensor): The climatology prediction (C, D, H, W).
-        obs_points_actual (list): List of tuples (c, z, y, x, value) for observed points.
-        land_mask_np (np.array): The 2D surface land mask (H, W).
-        config (Config): The configuration object.
-        sample_day_datetime (pd.Timestamp): The date of the sample.
-        num_obs_points (int): The number of observations used.
-        select_size (int, optional): The size of the ensemble subset being plotted.
+    Visualizes a specific depth level of the 3D ensemble sampling results.
     """
-    print(f"\nVisualizing and saving surface results for ensemble size {select_size or config.ensemble_size}...")
+    print(f"\nVisualizing and saving results for depth level {depth_level}...")
 
-    # --- Prepare data for plotting by selecting the surface layer (z=0) ---
-    ensemble_mean_surface = ensemble_mean[:, 0, :, :].cpu().numpy()
-    ensemble_spread_surface = ensemble_spread[:, 0, :, :].cpu().numpy()
-    true_sample_surface = true_sample[:, 0, :, :].cpu().numpy()
-    clim_pred_surface = clim_pred[:, 0, :, :].cpu().numpy()
+    # --- Prepare data for plotting by selecting the specified depth level ---
+    ensemble_mean_level = ensemble_mean[:, depth_level, :, :].cpu().numpy()
+    ensemble_spread_level = ensemble_spread[:, depth_level, :, :].cpu().numpy()
+    true_sample_level = true_sample[:, depth_level, :, :].cpu().numpy()
+    clim_pred_level = clim_pred[:, depth_level, :, :].cpu().numpy()
 
     num_channels = config.channels
-    # Create a 6-row plot for each channel
     fig, axes = plt.subplots(6, num_channels, figsize=(6 * num_channels, 24), squeeze=False)
 
     for c in range(num_channels):
         var_name = "Temperature" if c == 0 else "Salinity"
         cmap = 'viridis' if c == 0 else 'plasma'
-        error_cmap = 'bwr' # Blue-White-Red for errors
+        error_cmap = 'bwr'
 
         # Mask out land areas for all plots in this channel
-        masked_true = np.ma.masked_where(land_mask_np == 0, true_sample_surface[c])
-        masked_mean = np.ma.masked_where(land_mask_np == 0, ensemble_mean_surface[c])
-        masked_spread = np.ma.masked_where(land_mask_np == 0, ensemble_spread_surface[c])
-        masked_error = np.ma.masked_where(land_mask_np == 0, ensemble_mean_surface[c] - true_sample_surface[c])
-        clim_error = np.ma.masked_where(land_mask_np == 0, clim_pred_surface[c] - true_sample_surface[c])
+        masked_true = np.ma.masked_where(land_mask_np == 0, true_sample_level[c])
+        masked_mean = np.ma.masked_where(land_mask_np == 0, ensemble_mean_level[c])
+        masked_spread = np.ma.masked_where(land_mask_np == 0, ensemble_spread_level[c])
+        masked_error = np.ma.masked_where(land_mask_np == 0, ensemble_mean_level[c] - true_sample_level[c])
+        clim_error = np.ma.masked_where(land_mask_np == 0, clim_pred_level[c] - true_sample_level[c])
 
         # --- Row 1: Ground Truth ---
         ax = axes[0, c]
         im = ax.imshow(masked_true, cmap=cmap, origin='lower', vmin=0., vmax=1.)
-        # Plot surface observation points for this channel
+        # Plot observation points for this channel and depth level
         for obs_c, obs_z, obs_y, obs_x, _ in obs_points_actual:
-            if obs_c == c and obs_z == 0: # Only plot points for this channel and on the surface
+            if obs_c == c and obs_z == depth_level:
                 ax.scatter(obs_x, obs_y, c='red', marker='x', s=15)
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Ground Truth Surface {var_name}')
+        ax.set_title(f'Ground Truth (Depth Idx: {depth_level})')
 
         # --- Row 2: Climatology ---
         ax = axes[1, c]
-        im = ax.imshow(clim_pred_surface[c], cmap=cmap, origin='lower', vmin=0., vmax=1.)
+        im = ax.imshow(clim_pred_level[c], cmap=cmap, origin='lower', vmin=0., vmax=1.)
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Climatology Surface (Baseline)')
+        ax.set_title(f'Climatology (Depth Idx: {depth_level})')
 
         # --- Row 3: Ensemble Mean ---
         ax = axes[2, c]
         im = ax.imshow(masked_mean, cmap=cmap, origin='lower', vmin=0., vmax=1.)
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Ensemble Mean Surface')
+        ax.set_title(f'Ensemble Mean (Depth Idx: {depth_level})')
 
         # --- Row 4: Ensemble Spread (Uncertainty) ---
         ax = axes[3, c]
@@ -116,20 +98,19 @@ def plot_ensemble_results_3d_surface(
         plt.colorbar(im, ax=ax, label='Error')
         ax.set_title(f'Ensemble Mean Error (RMSE: {rmse:.4f})')
 
-        # Set common labels for all subplots in the column
         for row in range(6):
             axes[row, c].set_xlabel('Longitude Index')
             axes[row, c].set_ylabel('Latitude Index')
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to make room for suptitle
-    fig.suptitle(f'Ensemble Analysis for {sample_day_datetime.strftime("%Y-%m-%d")} ({num_obs_points} obs, {select_size or config.ensemble_size} members)', fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig.suptitle(f'Ensemble Analysis for {sample_day_datetime.strftime("%Y-%m-%d")} at Depth Index {depth_level}', fontsize=16)
 
-    # Construct a descriptive filename and save the plot
+    # Construct a descriptive filename that includes the depth level
     plot_save_path = os.path.join(
         config.sample_plot_dir,
-        f"ensemble_surface_obs{num_obs_points}_day{sample_day_datetime.dayofyear}_"
-        f"ens{select_size or config.ensemble_size}_{config.sampling_method}.png"
+        f"ensemble_obs{num_obs_points}_day{sample_day_datetime.dayofyear}_"
+        f"depth{depth_level}_ens{select_size or config.ensemble_size}_{config.sampling_method}.png"
     )
     plt.savefig(plot_save_path, dpi=150)
-    print(f"Ensemble plot saved to {plot_save_path}")
+    print(f"Ensemble plot for depth {depth_level} saved to {plot_save_path}")
     plt.close(fig)

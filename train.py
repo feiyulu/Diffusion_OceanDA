@@ -1,18 +1,17 @@
-# --- main.py ---
-# This is the main script for training the model and performing conditional sampling.
+# --- train.py ---
+# This is the main script for training the model.
 import torch
 import torch.optim as optim
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-import numpy as np
-import xarray as xr
-import os # Import the os module for path operations
+import os
 import argparse
-import imageio # For creating GIF animations
-from torch.utils.data import DataLoader, random_split # Import random_split
-
 import wandb
+from torch.utils.data import DataLoader, random_split
+import torch.nn as nn # Import the nn module
+import collections
+import collections.abc
+# This resolves the "AttributeError: module 'collections' has no attribute 'Container'"
+if not hasattr(collections, 'Container'):
+    collections.Container = collections.abc.Container
 
 # Import components from other files
 from config import Config # Already imported
@@ -75,11 +74,17 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
     
     if config.generate_training_animation:
-        create_training_animation(data, land_mask, config, config.training_animation_path)
+        create_training_animation(data, land_mask, config)
 
     # --- 2. Initialize Model and Diffusion Process ---
     # UNet is now initialized directly with the config object
     model = UNet(config, verbose_init=False).to(config.device)
+
+    use_data_parallel = getattr(config, 'use_data_parallel', False)
+    if use_data_parallel and torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs for training via DataParallel.")
+        model = nn.DataParallel(model)
+
     print(f"Total trainable parameters in UNet model: {count_parameters(model):,}")
 
     if config.use_wandb:
@@ -109,7 +114,16 @@ if __name__ == "__main__":
     if latest_checkpoint_path:
         print(f"Resuming training from checkpoint: {latest_checkpoint_path}...")
         checkpoint = torch.load(latest_checkpoint_path, map_location=config.device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+
+        state_dict = checkpoint['model_state_dict']
+        if use_data_parallel and not isinstance(model, nn.DataParallel):
+             # If checkpoint was saved with DataParallel but we are loading without it
+             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        elif not use_data_parallel and isinstance(model, nn.DataParallel):
+             # If checkpoint was saved without DataParallel but we are loading with it
+             state_dict = {'module.' + k: v for k, v in state_dict.items()}
+
+        model.load_state_dict(state_dict)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler and 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -130,11 +144,14 @@ if __name__ == "__main__":
 
     # --- 4. Finalize ---
     if config.save_model_after_training:
-        final_checkpoint_path = os.path.join(config.model_checkpoint_dir, f"ODA_ch{config.channels}_{config.test_id}_final.pth")
+        final_checkpoint_path = os.path.join(config.model_checkpoint_dir, f"ODA_ch{config.channels}_{config.test_id}_epoch_{config.epochs+1}.pth")
         print(f"Saving final model checkpoint to {final_checkpoint_path}...")
+
+        model_state_to_save = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
+
         torch.save({
             'epoch': config.epochs, 
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': model_state_to_save,
             'optimizer_state_dict': optimizer.state_dict(),
             'config': vars(config)
         }, final_checkpoint_path)

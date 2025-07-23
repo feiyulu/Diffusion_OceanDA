@@ -223,6 +223,7 @@ def variable_vertical_coarsen(
     Var: xr.DataArray,
     model_dz: xr.DataArray,
     combine_levels: List[int],
+    ocean_depth: Optional[xr.DataArray] = None,
     time_name: str = 'time',
     x_name: str = 'xh',
     y_name: str = 'yh',
@@ -230,41 +231,30 @@ def variable_vertical_coarsen(
 ) -> xr.DataArray:
     """
     Coarsens a data variable on a model's vertical grid by performing a weighted average.
-
-    Args:
-        Var (xr.DataArray): The 4D data variable to be coarsened (time, z, y, x).
-        model_dz (xr.DataArray): DataArray of the original fine layer thicknesses.
-        combine_levels (List[int]): List of indices defining the new coarse layers.
-        time_name (str): Name of the time dimension.
-        x_name (str): Name of the x-coordinate dimension.
-        y_name (str): Name of the y-coordinate dimension.
-        z_name (str): Name of the z-coordinate dimension.
-
-    Returns:
-        xr.DataArray: The vertically coarsened data variable.
+    If ocean_depth is provided, it masks levels that are below the sea floor with NaNs.
     """
     if combine_levels[-1] > len(model_dz):
         raise ValueError('Combine levels exceed depth levels')
     if len(Var[z_name]) != len(model_dz):
         raise ValueError('Variable vertical levels do not match model_dz levels')
 
-    # Call the existing function to get the coarse grid properties. This avoids code duplication.
     model_dz_coarse, model_z_coarse = depth_vertical_coarsen(model_dz, combine_levels)
 
-    # Prepare an empty array for the coarsened data
     coarse_shape = (len(Var[time_name]), len(model_dz_coarse), len(Var[y_name]), len(Var[x_name]))
-    Var_data_coarse = np.empty(coarse_shape, dtype=np.float32)
+    Var_data_coarse = np.full(coarse_shape, np.nan, dtype=np.float32)
     
-    # Weight the variable by the thickness of each layer for accurate averaging
-    Var_weighted = Var * model_dz.data[None, :, None, None]
-    
+    # Pre-calculate the weighted average for all cells first.
     for i in range(len(model_dz_coarse)):
-        # Sum the weighted variable over the fine levels that make up one coarse level
-        var_sum = Var_weighted[:, combine_levels[i]:combine_levels[i+1], :, :].sum(dim=z_name, skipna=True)
-        # Divide by the total thickness of the coarse level to get the weighted average
-        Var_data_coarse[:, i, :, :] = var_sum / model_dz_coarse[i]
+        var_slice = Var[:, combine_levels[i]:combine_levels[i+1], :, :]
+        dz_slice = model_dz[combine_levels[i]:combine_levels[i+1]]
+        
+        var_sum = (var_slice * dz_slice.data[None, :, None, None]).sum(dim=z_name, skipna=True)
+        # Calculate weights only for non-NaN cells in the variable slice
+        weights_sum = dz_slice.sum()
+        weights_sum = weights_sum.where(weights_sum > 0)
+        
+        Var_data_coarse[:, i, :, :] = (var_sum / weights_sum).values
 
-    # Create the new xarray DataArray with the coarsened coordinates
     Var_coarse = xr.DataArray(
         Var_data_coarse,
         coords={
@@ -275,5 +265,22 @@ def variable_vertical_coarsen(
         },
         dims=Var.dims
     ).astype('float32')
+
+    # If ocean_depth is provided, create a mask based on fine-level depths.
+    if ocean_depth is not None:
+        # Get the depth of the bottom of each fine layer
+        model_zi_fine = np.cumsum(model_dz.values)
+        
+        # Create a 3D mask for the original fine grid. True if cell is below the ocean floor.
+        fine_grid_is_bottom = model_zi_fine[:, None, None] > ocean_depth.values[None, :, :]
+
+        # Loop through the coarse levels to create the final mask
+        for i in range(len(model_dz_coarse)):
+            # Check if ANY fine level within this coarse bin hits the bottom
+            fine_levels_in_coarse_bin = fine_grid_is_bottom[combine_levels[i]:combine_levels[i+1], :, :]
+            coarse_cell_hits_bottom = np.any(fine_levels_in_coarse_bin, axis=0) # Shape: (y, x)
+
+            # Where the coarse cell hits the bottom, set its value to NaN
+            Var_coarse[:, i, :, :] = Var_coarse[:, i, :, :].where(~coarse_cell_hits_bottom)
 
     return Var_coarse

@@ -127,6 +127,36 @@ class Diffusion:
             return model_mean + torch.sqrt(posterior_variance_t) * noise
 
     @torch.no_grad()
+    def p_sample_from_x0(self, x_t, t, x_0_pred, mask_in):
+        """
+        Performs one step of the DDPM reverse process, deriving the mean from a predicted x0.
+        This is mathematically equivalent to predicting noise but can be more convenient.
+        """
+        t_index = t[0].item()
+        if t_index == 0:
+            return x_0_pred
+
+        # Get pre-calculated constants for the current timestep t
+        betas_t = self.betas[t, None, None, None, None]
+        sqrt_one_minus_alphas_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t, None, None, None, None]
+        sqrt_recip_alphas_t = self.sqrt_recip_alphas[t, None, None, None, None]
+        alphas_cumprod_prev_t = self.alphas_cumprod_prev[t, None, None, None, None]
+        alphas_t = self.alphas[t, None, None, None, None]
+        
+        # Equation 7 from DDPM paper: calculate the posterior mean from x_0_pred
+        # mu_tilde(x_t, x_0) = ...
+        term1 = (torch.sqrt(alphas_cumprod_prev_t) * betas_t) / (1. - self.alphas_cumprod[t, None, None, None, None]) * x_0_pred
+        term2 = (torch.sqrt(alphas_t) * (1. - alphas_cumprod_prev_t)) / (1. - self.alphas_cumprod[t, None, None, None, None]) * x_t
+        posterior_mean = (term1 + term2) * mask_in
+
+        # Get posterior variance
+        posterior_variance_t = self.posterior_variance[t, None, None, None, None]
+        
+        # Add noise to the mean to get the sample for the previous timestep
+        noise = torch.randn_like(x_t) * mask_in
+        return posterior_mean + torch.sqrt(posterior_variance_t) * noise
+        
+    @torch.no_grad()
     def ddim_sample(self, x_t, t, t_prev, x_0_pred, mask_in, eta=0.0):
         """
         Performs one step of the DDIM reverse process for 3D data.
