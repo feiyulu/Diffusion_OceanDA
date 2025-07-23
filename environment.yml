@@ -1,0 +1,56 @@
+# Conda environment configuration for the Diffusion Ocean Data Assimilation project.
+#
+# To create this environment, navigate to your project directory and run:
+# conda env create -f environment.yml
+#
+# To activate the environment, run:
+# conda activate diffusion_ocean
+
+name: diffusion_ocean
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # --- Core Python ---
+  - python=3.10
+
+  # --- PyTorch & GPU Support ---
+  # Using specific versions for reproducibility.
+  # These versions are known to be stable and compatible.
+  - pytorch::pytorch=2.1.2
+  - pytorch::torchvision
+  - pytorch::torchaudio
+  # This package ensures the correct NVIDIA CUDA toolkit is installed in the environment.
+  # Version 12.1 is compatible with PyTorch 2.1.x.
+  - pytorch-cuda=12.1
+
+  # --- Scientific Computing & Data Handling ---
+  - numpy
+  - pandas
+  - xarray
+  - scipy
+  # Essential for reading/writing NetCDF files with xarray.
+  - netcdf4
+  - cftime
+
+  # --- Plotting & Visualization ---
+  - matplotlib
+  - seaborn
+  # Cartopy is for map-based plotting and often has complex dependencies,
+  # which is why Conda is highly recommended for this project.
+  - cartopy
+  - imageio # Used for creating GIFs
+
+  # --- Machine Learning & Utilities ---
+  - tqdm # For progress bars
+  - einops # For flexible tensor operations
+  - wandb # For experiment tracking (Weights & Biases)
+  
+  # --- Pip for any packages not on Conda ---
+  - pip
+  # - pip:
+  #   - some-package-from-pypi
+
