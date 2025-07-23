@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, random_split # Import random_split
 import xarray as xr
 import cartopy.crs as ccrs
 import wandb
-
+import seaborn
 from plotting_utils import plot_losses
 
 # --- Training Function ---
@@ -52,7 +52,8 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
 
                 predicted_epsilon = model(x_t, t, current_land_mask, 
                                           conditions=conditions_input, 
-                                          location_field=loc_field_input)
+                                          location_field=loc_field_input,
+                                          verbose_forward=True)
 
                 loss = F.mse_loss(predicted_epsilon * current_land_mask, true_epsilon * current_land_mask)
                 loss = loss / config.gradient_accumulation_steps
@@ -164,7 +165,7 @@ def create_training_animation(data_tensor, land_mask, config):
 
             for c in range(num_rows):
                 var_name = "Temperature" if c == 0 else "Salinity"
-                cmap = 'coolwarm' if c == 0 else 'plasma'
+                cmap = seaborn.color_palette("Spectral_r", as_cmap=True) if c == 0 else 'plasma'
                 
                 ax = axes[c, 0]
                 masked_data = np.ma.masked_where(land_mask_np == 0, sample_np_level[c])

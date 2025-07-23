@@ -141,7 +141,9 @@ class DownBlock(nn.Module):
                 self.attn_blocks.append(nn.ModuleList([SelfAttentionBlock(out_channels), CrossAttentionBlock(out_channels, context_dim)]))
             else:
                 self.attn_blocks.append(nn.ModuleList([nn.Identity(), nn.Identity()]))
-        self.downsample = PartialConv3d(out_channels, out_channels, kernel_size=(1, 3, 3), stride=(1, 2, 2), padding=(0, 1, 1))
+        # Using a larger horizontal kernel to capture larger spatial patterns,
+        # while maintaining a balanced stride for gradual downsampling.
+        self.downsample = PartialConv3d(out_channels, out_channels, kernel_size=(3, 7, 7), stride=(2, 2, 2), padding=(1, 3, 3))
 
     def forward(self, x, time_emb, mask, context=None, use_checkpointing=False):
         skip_outputs = []
@@ -181,16 +183,23 @@ class UpBlock(nn.Module):
                 self.attn_blocks.append(nn.ModuleList([nn.Identity(), nn.Identity()]))
 
     def forward(self, x, skip_xs, time_emb, mask, context=None, use_checkpointing=False):
+        # Get the spatial shape (D, H, W) from the corresponding skip connection tensor.
+        # This is the target shape we need to upsample our current tensor 'x' to.
         skip_ref = skip_xs[0]
         target_shape = skip_ref.shape[-3:]
 
-        # Upsample both x AND the mask BEFORE the convolution.
+        # Upsample the input tensor 'x' and its mask to the target shape.
+        # F.interpolate is used instead of ConvTranspose3d to avoid checkerboard artifacts
+        # and to guarantee the output size matches the skip connection's size perfectly.
         x = F.interpolate(x, size=target_shape, mode='trilinear', align_corners=False)
         mask = F.interpolate(mask, size=target_shape, mode='nearest')
         
-        # Now that both x and mask have the correct high-resolution shape, we can convolve.
+        # Now that 'x' has the same spatial dimensions as the skip connections,
+        # we can apply a convolution.
         x, mask = self.conv_after_upsample(x, mask)
         
+        # Concatenate the upsampled tensor with all the skip connections from the corresponding DownBlock.
+        # This is guaranteed to work because we explicitly matched the sizes above.
         x = torch.cat([x] + skip_xs, dim=1)
 
         mask = mask[:, :1, :, :, :].repeat(1, x.shape[1], 1, 1, 1)
@@ -281,6 +290,7 @@ class UNet(nn.Module):
 
     def forward(self, x, t, mask, conditions=None, location_field=None, verbose_forward=True):
         should_log = verbose_forward and not self.has_logged_forward
+
         if should_log: print("\n--- UNet Forward Pass (Actual Shapes) ---")
 
         if self.location_embedding_channels > 0 and location_field is not None:
@@ -303,16 +313,15 @@ class UNet(nn.Module):
         skip_connections = []
         for i, stage in enumerate(self.down_stages):
             if should_log: print(f"  [Down Stage {i+1}] Input:  {x.shape}")
-            # --- Pass checkpointing flag to the block ---
             x, current_mask, skips = stage(x, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
-            if should_log: print(f"  [Down Stage {i+1}] Skips:  {[s.shape for s in skips]}")
-            if should_log: print(f"  [Down Stage {i+1}] Output: {x.shape}")
+            if should_log:
+                print(f"  [Down Stage {i+1}] Skips:  {[s.shape for s in skips]}")
+                print(f"  [Down Stage {i+1}] Output: {x.shape}")
             skip_connections.append(skips)
         
         if should_log: print(f"Bottleneck Input:        {x.shape}")
         for layer in self.bottleneck:
             if isinstance(layer, ResidualBlock):
-                # --- Apply checkpointing to bottleneck ResBlocks ---
                 if self.use_checkpointing:
                     x, current_mask = checkpoint(layer, x, time_emb, current_mask)
                 else:
@@ -325,14 +334,15 @@ class UNet(nn.Module):
             if should_log: print(f"  [Up Stage {i+1}] Input:    {x.shape}")
             skips_for_stage = skip_connections.pop()
             if should_log: print(f"  [Up Stage {i+1}] Using Skips: {[s.shape for s in skips_for_stage]}")
-            # --- Pass checkpointing flag to the block ---
             x, current_mask = stage(x, skips_for_stage, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
             if should_log: print(f"  [Up Stage {i+1}] Output:   {x.shape}")
 
         output_prediction = self.final_conv(x)
+        
         if should_log: 
             print(f"After Final Conv:      {output_prediction.shape}")
             print("-----------------------------------------")
+            # On the next forward pass, should_log will be False for everyone.
             self.has_logged_forward = True
         
         return output_prediction * mask

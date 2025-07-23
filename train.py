@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
     # --- 2. Initialize Model and Diffusion Process ---
     # UNet is now initialized directly with the config object
-    model = UNet(config, verbose_init=False).to(config.device)
+    model = UNet(config, verbose_init=True).to(config.device)
 
     use_data_parallel = getattr(config, 'use_data_parallel', False)
     if use_data_parallel and torch.cuda.device_count() > 1:
