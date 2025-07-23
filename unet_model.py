@@ -289,14 +289,16 @@ class UNet(nn.Module):
         self.final_conv = nn.Conv3d(base_channels, self.out_channels, kernel_size=1)
 
     def forward(self, x, t, mask, conditions=None, location_field=None, verbose_forward=True):
+        is_main_process = not x.device.type == 'cuda' or x.device.index == 0
         should_log = verbose_forward and not self.has_logged_forward
 
-        if should_log: print("\n--- UNet Forward Pass (Actual Shapes) ---")
+        if should_log and is_main_process:
+            print("\n--- UNet Forward Pass (Actual Shapes) ---")
 
         if self.location_embedding_channels > 0 and location_field is not None:
             location_field_3d = location_field.unsqueeze(2).repeat(1, 1, x.shape[2], 1, 1)
             x = torch.cat((x, location_field_3d), dim=1)
-            if should_log: print(f"After Location Concat: {x.shape}")
+            if should_log and is_main_process: print(f"After Location Concat: {x.shape}")
         
         time_emb = self.time_mlp(t)
         
@@ -308,18 +310,18 @@ class UNet(nn.Module):
 
         initial_mask = mask.repeat(1, x.shape[1], 1, 1, 1)
         x, current_mask = self.initial_conv(x, initial_mask)
-        if should_log: print(f"After Initial Conv:    {x.shape}")
+        if should_log and is_main_process: print(f"After Initial Conv:    {x.shape}")
         
         skip_connections = []
         for i, stage in enumerate(self.down_stages):
-            if should_log: print(f"  [Down Stage {i+1}] Input:  {x.shape}")
+            if should_log and is_main_process: print(f"  [Down Stage {i+1}] Input:  {x.shape}")
             x, current_mask, skips = stage(x, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
-            if should_log:
+            if should_log and is_main_process:
                 print(f"  [Down Stage {i+1}] Skips:  {[s.shape for s in skips]}")
                 print(f"  [Down Stage {i+1}] Output: {x.shape}")
             skip_connections.append(skips)
         
-        if should_log: print(f"Bottleneck Input:        {x.shape}")
+        if should_log and is_main_process: print(f"Bottleneck Input:        {x.shape}")
         for layer in self.bottleneck:
             if isinstance(layer, ResidualBlock):
                 if self.use_checkpointing:
@@ -328,20 +330,22 @@ class UNet(nn.Module):
                     x, current_mask = layer(x, time_emb, current_mask)
             elif isinstance(layer, SelfAttentionBlock):
                 x, current_mask = layer(x, current_mask)
-        if should_log: print(f"Bottleneck Output:       {x.shape}")
+        if should_log and is_main_process: print(f"Bottleneck Output:       {x.shape}")
 
         for i, stage in enumerate(self.up_stages):
-            if should_log: print(f"  [Up Stage {i+1}] Input:    {x.shape}")
+            if should_log and is_main_process: print(f"  [Up Stage {i+1}] Input:    {x.shape}")
             skips_for_stage = skip_connections.pop()
-            if should_log: print(f"  [Up Stage {i+1}] Using Skips: {[s.shape for s in skips_for_stage]}")
+            if should_log and is_main_process: print(f"  [Up Stage {i+1}] Using Skips: {[s.shape for s in skips_for_stage]}")
             x, current_mask = stage(x, skips_for_stage, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
-            if should_log: print(f"  [Up Stage {i+1}] Output:   {x.shape}")
+            if should_log and is_main_process: print(f"  [Up Stage {i+1}] Output:   {x.shape}")
 
         output_prediction = self.final_conv(x)
         
-        if should_log: 
-            print(f"After Final Conv:      {output_prediction.shape}")
-            print("-----------------------------------------")
+        if should_log:
+            if is_main_process:
+                print(f"After Final Conv:      {output_prediction.shape}")
+                print("-----------------------------------------")
+            # Set the flag on ALL replicas after the first pass.
             # On the next forward pass, should_log will be False for everyone.
             self.has_logged_forward = True
         

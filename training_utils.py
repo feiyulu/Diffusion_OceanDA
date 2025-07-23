@@ -96,7 +96,8 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
 
                     predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, 
                                                   conditions=conditions_input_val, 
-                                                  location_field=loc_field_input_val)
+                                                  location_field=loc_field_input_val,
+                                                  verbose_forward=False)
                     val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val, true_epsilon_val * current_land_mask_val)
                 
                 total_val_loss += val_loss.item()
