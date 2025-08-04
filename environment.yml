@@ -9,6 +9,7 @@
 name: diffusion_ocean
 
 channels:
+  - nvidia   # Added nvidia channel for reliable CUDA packages
   - pytorch
   - conda-forge
   - defaults
@@ -20,19 +21,20 @@ dependencies:
   # --- PyTorch & GPU Support ---
   # Using specific versions for reproducibility.
   # These versions are known to be stable and compatible.
-  - pytorch::pytorch=2.1.2
-  - pytorch::torchvision
-  - pytorch::torchaudio
-  # This package ensures the correct NVIDIA CUDA toolkit is installed in the environment.
-  # Version 12.1 is compatible with PyTorch 2.1.x.
-  - pytorch-cuda=12.1
+  - pytorch=2.1.2
+  - torchvision
+  - torchaudio
+  # Directly specifying a stable CUDA Toolkit version from the nvidia channel.
+  # PyTorch will automatically use this toolkit.
+  - cudatoolkit=11.8
 
   # --- Scientific Computing & Data Handling ---
-  - numpy
+  - numpy<2.0
   - pandas
   - xarray
   - scipy
   # Essential for reading/writing NetCDF files with xarray.
+  - dask
   - netcdf4
   - cftime
 

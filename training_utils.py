@@ -32,6 +32,10 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
     scaler = GradScaler(enabled=use_amp)
     if use_amp:
         print("Using Automatic Mixed Precision (AMP).")
+    
+    # Define the threshold for gradient clipping
+    gradient_clip_val = 1.0
+    print(f"Gradient clipping enabled with max norm: {gradient_clip_val}")
 
     for epoch in range(config.start_epoch, config.epochs):
         total_train_loss = 0
@@ -62,6 +66,10 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
             scaler.scale(loss).backward()
 
             if (batch_idx + 1) % config.gradient_accumulation_steps == 0:
+                # Unscale the gradients before clipping
+                scaler.unscale_(optimizer)
+                # Clip the norm of the gradients to prevent them from exploding
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
                 # --- MEMORY SAVING: Unscale gradients and step optimizer ---
                 scaler.step(optimizer)
                 scaler.update()
@@ -71,6 +79,8 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
             pbar.set_postfix(loss=loss.item() * config.gradient_accumulation_steps)
 
         if (len(train_loader.dataset)) % config.gradient_accumulation_steps != 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -183,9 +193,10 @@ def create_training_animation(data_tensor, land_mask, config):
             plt.tight_layout()
             
             fig.canvas.draw()
-            image = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
-            image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-            frames.append(image)
+            rgba_buf = fig.canvas.buffer_rgba()
+            image_with_alpha = np.asarray(rgba_buf).reshape(fig.canvas.get_width_height()[::-1] + (4,))
+            image_rgb = image_with_alpha[:, :, :3]
+            frames.append(image_rgb)
             plt.close(fig)
 
         if frames:
