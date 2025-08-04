@@ -59,6 +59,9 @@ if __name__ == "__main__":
     model.load_state_dict(state_dict)
     print(f"Model from epoch {checkpoint.get('epoch', 'N/A')} loaded successfully.")
 
+    z_ds=xr.open_dataset(config.filepath_z_static)
+    z_da=z_ds['z']
+
     # --- 3. Loop Through Sample Days and Generate Ensembles ---
     for sample_day in config.sample_days:
         sample_day_str = pd.to_datetime(f"{config.sample_years[0]}-01-01") + pd.to_timedelta(sample_day, unit='d')
@@ -72,7 +75,13 @@ if __name__ == "__main__":
         land_mask = land_mask.to(config.device)
         target_location_field = true_location_field.to(config.device)
 
-        clim_pred = torch.zeros_like(true_sample.squeeze(0))
+        clim_ds = xr.open_dataset(config.filepath_t_clim)
+        if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
+            clim_ds = clim_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
+        clim_da = clim_ds[config.varname_t].isel(
+            lat=slice(config.lat_range[0], config.lat_range[1]), 
+            lon=slice(config.lon_range[0], config.lon_range[1]))
+        clim_pred = (clim_da - config.T_range[0]) / (config.T_range[1]-config.T_range[0])
 
         if config.use_real_observations:
             observations, observed_mask, obs_points_actual = map_real_obs_to_grid_3d(
@@ -137,7 +146,7 @@ if __name__ == "__main__":
                     ensemble_mean, ensemble_spread, true_sample.squeeze(0), clim_pred, 
                     obs_points_actual, land_mask[0, 0, depth_idx].cpu().numpy(),
                     config, sample_day_str, num_obs_points,
-                    depth_level=depth_idx
+                    depth_level=depth_idx, depth=z_da[depth_idx]
                 )
         else:
             print("Ensemble generation failed.")

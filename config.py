@@ -18,11 +18,13 @@ class Config:
         filepath_s_test=None,
         filepath_static=None, # Used for grid info and static fields like ocean depth
         filepath_mask=None,
+        filepath_z_static=None,
         varname_t='T',
         varname_s='S',
         varname_lat='lat',
         varname_lon='lon',
         mask_varname='wet', # Variable name for the land/ocean mask in the static file
+        filepath_t_clim=None,
 
         # --- Data Slicing and Subsetting ---
         depth_range=[0,25],
@@ -126,12 +128,14 @@ class Config:
         
         self.filepath_static = filepath_static
         self.filepath_mask = filepath_mask
+        self.filepath_z_static = filepath_z_static
         self.mask_varname = mask_varname
         self.varname_t = varname_t
         self.varname_s = varname_s
         self.varname_lat = varname_lat
         self.varname_lon = varname_lon
-
+        self.filepath_t_clim = filepath_t_clim
+        
         self.depth_range = depth_range
         self.lat_range = lat_range
         self.lon_range = lon_range

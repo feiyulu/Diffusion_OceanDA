@@ -29,7 +29,7 @@ def plot_losses(train_losses, val_losses, save_path):
 def plot_ensemble_results_3d(
     ensemble_mean, ensemble_spread, true_sample, clim_pred,
     obs_points_actual, land_mask_np, config, sample_day_datetime,
-    num_obs_points, depth_level, select_size=None):
+    num_obs_points, depth_level, depth, select_size=None):
     """
     Visualizes a specific depth level of the 3D ensemble sampling results.
     """
@@ -39,12 +39,16 @@ def plot_ensemble_results_3d(
     ensemble_mean_level = ensemble_mean[:, depth_level, :, :].cpu().numpy()
     ensemble_spread_level = ensemble_spread[:, depth_level, :, :].cpu().numpy()
     true_sample_level = true_sample[:, depth_level, :, :].cpu().numpy()
-    clim_pred_level = clim_pred[:, depth_level, :, :].cpu().numpy()
+    clim_pred_level = clim_pred[:, depth_level, :, :]
 
     num_channels = config.channels
     fig, axes = plt.subplots(6, num_channels, figsize=(6 * num_channels, 24), squeeze=False)
-
+    
     for c in range(num_channels):
+        vmin=0.
+        vmax=np.exp(-depth/3000)
+        verror=0.2*np.exp(-depth/3000)
+
         var_name = "Temperature" if c == 0 else "Salinity"
         cmap = 'viridis' if c == 0 else 'plasma'
         error_cmap = 'bwr'
@@ -58,43 +62,43 @@ def plot_ensemble_results_3d(
 
         # --- Row 1: Ground Truth ---
         ax = axes[0, c]
-        im = ax.imshow(masked_true, cmap=cmap, origin='lower', vmin=0., vmax=1.)
+        im = ax.imshow(masked_true, cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
         # Plot observation points for this channel and depth level
         for obs_c, obs_z, obs_y, obs_x, _ in obs_points_actual:
             if obs_c == c and obs_z == depth_level:
                 ax.scatter(obs_x, obs_y, c='red', marker='x', s=15)
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Ground Truth (Depth Idx: {depth_level})')
+        ax.set_title(f'Ground Truth (Depth {depth_level}: {depth})')
 
         # --- Row 2: Climatology ---
         ax = axes[1, c]
-        im = ax.imshow(clim_pred_level[c], cmap=cmap, origin='lower', vmin=0., vmax=1.)
+        im = ax.imshow(clim_pred_level[c], cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Climatology (Depth Idx: {depth_level})')
+        ax.set_title(f'Climatology (Depth {depth_level}: {depth})')
 
         # --- Row 3: Ensemble Mean ---
         ax = axes[2, c]
-        im = ax.imshow(masked_mean, cmap=cmap, origin='lower', vmin=0., vmax=1.)
+        im = ax.imshow(masked_mean, cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Ensemble Mean (Depth Idx: {depth_level})')
+        ax.set_title(f'Ensemble Mean (Depth {depth_level}: {depth})')
 
         # --- Row 4: Ensemble Spread (Uncertainty) ---
         ax = axes[3, c]
-        im = ax.imshow(masked_spread, cmap='inferno', origin='lower')
+        im = ax.imshow(masked_spread, cmap='inferno', origin='lower', vmin=0., vmax=verror)
         plt.colorbar(im, ax=ax, label='Std. Dev.')
         ax.set_title(f'Ensemble Spread (Uncertainty)')
 
         # --- Row 5: Climatological Error ---
         ax = axes[4, c]
         rmse = np.sqrt(np.mean(clim_error**2))
-        im = ax.imshow(clim_error, cmap=error_cmap, origin='lower', vmin=-0.2, vmax=0.2)
+        im = ax.imshow(clim_error, cmap=error_cmap, origin='lower', vmin=-verror, vmax=verror)
         plt.colorbar(im, ax=ax, label='Error')
         ax.set_title(f'Climatology Error (RMSE: {rmse:.4f})')
 
         # --- Row 6: Mean Error (Bias) ---
         ax = axes[5, c]
         rmse = np.sqrt(np.mean(masked_error**2))
-        im = ax.imshow(masked_error, cmap=error_cmap, origin='lower', vmin=-0.2, vmax=0.2)
+        im = ax.imshow(masked_error, cmap=error_cmap, origin='lower', vmin=-verror, vmax=verror)
         plt.colorbar(im, ax=ax, label='Error')
         ax.set_title(f'Ensemble Mean Error (RMSE: {rmse:.4f})')
 
@@ -103,7 +107,7 @@ def plot_ensemble_results_3d(
             axes[row, c].set_ylabel('Latitude Index')
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig.suptitle(f'Ensemble Analysis for {sample_day_datetime.strftime("%Y-%m-%d")} at Depth Index {depth_level}', fontsize=16)
+    fig.suptitle(f'Ensemble Analysis for {sample_day_datetime.strftime("%Y-%m-%d")} at Depth {depth_level} {depth}', fontsize=16)
 
     # Construct a descriptive filename that includes the depth level
     plot_save_path = os.path.join(
@@ -112,5 +116,5 @@ def plot_ensemble_results_3d(
         f"depth{depth_level}_ens{select_size or config.ensemble_size}_{config.sampling_method}.png"
     )
     plt.savefig(plot_save_path, dpi=150)
-    print(f"Ensemble plot for depth {depth_level} saved to {plot_save_path}")
+    print(f"Ensemble plot for depth {depth_level} {depth} saved to {plot_save_path}")
     plt.close(fig)
