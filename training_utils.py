@@ -54,10 +54,10 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
                 conditions_input = {k: v.to(config.device) for k, v in conditions_batch.items()}
                 loc_field_input = location_field_batch.to(config.device)
 
+                # FIX: Removed verbose_forward argument. The model now handles this internally.
                 predicted_epsilon = model(x_t, t, current_land_mask, 
                                           conditions=conditions_input, 
-                                          location_field=loc_field_input,
-                                          verbose_forward=True)
+                                          location_field=loc_field_input)
 
                 loss = F.mse_loss(predicted_epsilon * current_land_mask, true_epsilon * current_land_mask)
                 loss = loss / config.gradient_accumulation_steps
@@ -106,8 +106,7 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
 
                     predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, 
                                                   conditions=conditions_input_val, 
-                                                  location_field=loc_field_input_val,
-                                                  verbose_forward=False)
+                                                  location_field=loc_field_input_val)
                     val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val, true_epsilon_val * current_land_mask_val)
                 
                 total_val_loss += val_loss.item()
@@ -161,6 +160,12 @@ def create_training_animation(data_tensor, land_mask, config):
         data_to_animate = data_tensor[:min(len(data_tensor), max_frames*5):5]
 
         static_ds = xr.open_dataset(config.filepath_static)
+        
+        z_ds=xr.open_dataset(config.filepath_z_static)
+        z_da=z_ds['z']
+        vmin=0.
+        vmax=np.exp(-z_da[depth_level]/3000)
+
         if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
             static_ds = static_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
         lat_grid = static_ds['geolat'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
@@ -182,7 +187,7 @@ def create_training_animation(data_tensor, land_mask, config):
                 masked_data = np.ma.masked_where(land_mask_np == 0, sample_np_level[c])
                 im = ax.pcolormesh(
                     lon_grid,lat_grid,masked_data,
-                    cmap=cmap,vmin=0.,vmax=1.,transform=ccrs.PlateCarree())
+                    cmap=cmap,vmin=vmin,vmax=vmax,transform=ccrs.PlateCarree())
                 ax.gridlines(
                     crs=ccrs.PlateCarree(), draw_labels=True,linewidth=2, 
                     color='gray', alpha=0.5, linestyle='--')

@@ -43,6 +43,9 @@ class Config:
         beta_end=0.01,
 
         # --- U-Net Architecture ---
+        use_vertical_conv=False, 
+        vertical_conv_num_blocks=2,
+        vertical_conv_out_channels=None,
         base_unet_channels=32,
         channel_multipliers=(1, 2, 4, 8),
         attn_resolutions=(8,), # Resolutions at which to use attention blocks
@@ -155,7 +158,11 @@ class Config:
         self.timesteps = timesteps
         self.beta_start = beta_start
         self.beta_end = beta_end
+        self.use_vertical_conv = use_vertical_conv 
+        self.vertical_conv_num_blocks = vertical_conv_num_blocks
         self.base_unet_channels = base_unet_channels
+        self.vertical_conv_out_channels = vertical_conv_out_channels \
+            if vertical_conv_out_channels is not None else self.base_unet_channels
         self.channel_multipliers = channel_multipliers
         self.attn_resolutions = attn_resolutions
         self.num_res_blocks = num_res_blocks

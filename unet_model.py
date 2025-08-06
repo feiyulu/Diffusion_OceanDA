@@ -6,6 +6,34 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch.utils.checkpoint import checkpoint # Import checkpointing utility
 
+# --- NEW: 1D Partial Convolution for Vertical Processing ---
+class PartialConv1d(nn.Conv1d):
+    """A partial convolution layer for 1D data (used for the vertical dimension)."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 1D kernel for updating the 1D mask
+        self.register_buffer('sum_kernel', torch.ones(1, 1, self.kernel_size[0]))
+        self.sum_kernel.requires_grad = False
+        self.window_size = self.kernel_size[0]
+
+    def forward(self, input_tensor, mask_in):
+        masked_input = input_tensor * mask_in
+        output = super().forward(masked_input)
+
+        with torch.no_grad():
+            update_mask = F.conv1d(
+                mask_in[:, :1, :], self.sum_kernel, bias=None,
+                stride=self.stride, padding=self.padding, dilation=self.dilation, groups=1
+            )
+            mask_ratio = self.window_size / (update_mask + 1e-8)
+            mask_out = (update_mask > 0).float()
+            mask_ratio = torch.clamp(mask_ratio, 0.0, 1e4)
+
+        corrected_output = output * mask_ratio
+        final_output = corrected_output * mask_out
+        final_mask = mask_out.repeat(1, self.out_channels, 1)
+        return final_output, final_mask
+
 # Custom Partial Convolution Layer for handling masked regions
 class PartialConv3d(nn.Conv3d):
     def __init__(self, *args, **kwargs):
@@ -46,16 +74,82 @@ class SinusoidalPositionalEmbedding(nn.Module):
         embeddings = time[:, None] * embeddings[None, :]
         return torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
 
+class VerticalResBlock(nn.Module):
+    """A residual block with two 1D partial convolutions for vertical processing."""
+    def __init__(self, in_channels, out_channels, dropout_prob):
+        super().__init__()
+        self.conv1 = PartialConv1d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(8 if out_channels % 8 == 0 else out_channels, out_channels)
+        self.act1 = nn.SiLU()
+        self.dropout = nn.Dropout(dropout_prob)
+        self.conv2 = PartialConv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.norm2 = nn.GroupNorm(8 if out_channels % 8 == 0 else out_channels, out_channels)
+        self.act2 = nn.SiLU()
+        self.residual_conv = PartialConv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x, mask):
+        h, h_mask = self.conv1(x, mask)
+        h = self.norm1(h) * h_mask
+        h = self.act1(h) * h_mask
+        h = self.dropout(h)
+
+        h, h_mask = self.conv2(h, h_mask)
+        h = self.norm2(h) * h_mask
+        h = self.act2(h) * h_mask
+
+        residual, residual_mask = self.residual_conv(x, mask) if isinstance(self.residual_conv, PartialConv1d) else (self.residual_conv(x), mask)
+        
+        combined_mask = h_mask * residual_mask
+        return (h + residual) * combined_mask, combined_mask
+
+class VerticalConvModule(nn.Module):
+    """Applies convolutions along the vertical axis before the main 3D U-Net."""
+    def __init__(self, in_channels, out_channels, num_blocks=2, dropout_prob=0.1):
+        super().__init__()
+        self.blocks = nn.ModuleList()
+        
+        # First block maps input channels to output channels
+        self.blocks.append(VerticalResBlock(in_channels, out_channels, dropout_prob))
+        
+        # Subsequent blocks map output channels to output channels
+        for _ in range(num_blocks - 1):
+            self.blocks.append(VerticalResBlock(out_channels, out_channels, dropout_prob))
+
+    def forward(self, x, mask):
+        # x shape: (N, C, D, H, W)
+        # mask shape: (N, 1, D, H, W)
+        N, C, D, H, W = x.shape
+        
+        # Reshape for vertical convolution: treat each (H, W) location as a batch element
+        # New shape: (N*H*W, C, D)
+        x_reshaped = rearrange(x, 'n c d h w -> (n h w) c d')
+        
+        # Reshape mask similarly. Use only the first channel of the mask.
+        mask_reshaped = rearrange(mask[:,:1], 'n c d h w -> (n h w) c d')
+        
+        for block in self.blocks:
+            x_reshaped, mask_reshaped = block(x_reshaped, mask_reshaped)
+
+        # Reshape back to original 3D structure
+        # (N*H*W, C_out, D) -> (N, C_out, D, H, W)
+        x_out = rearrange(x_reshaped, '(n h w) c d -> n c d h w', h=H, w=W)
+        
+        # Also reshape the final processed mask and return it
+        mask_out = rearrange(mask_reshaped, '(n h w) c d -> n c d h w', h=H, w=W)
+        
+        return x_out, mask_out
+
+
 class ResidualBlock(nn.Module):
     """A residual block with two 3D partial convolutions and time conditioning."""
-    def __init__(self, in_channels, out_channels, time_emb_dim, dropout_prob):
+    def __init__(self, in_channels, out_channels, time_embedding_dim, dropout_prob):
         super().__init__()
         self.conv1 = PartialConv3d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.GroupNorm(8, out_channels)
+        self.norm1 = nn.GroupNorm(8 if out_channels % 8 == 0 else out_channels, out_channels)
         self.act1 = nn.SiLU()
-        self.time_mlp = nn.Linear(time_emb_dim, out_channels * 2) if time_emb_dim > 0 else None
+        self.time_mlp = nn.Linear(time_embedding_dim, out_channels * 2) if time_embedding_dim > 0 else None
         self.conv2 = PartialConv3d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.norm2 = nn.GroupNorm(8, out_channels)
+        self.norm2 = nn.GroupNorm(8 if out_channels % 8 == 0 else out_channels, out_channels)
         self.act2 = nn.SiLU()
         self.residual_conv = PartialConv3d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
         self.dropout = nn.Dropout(dropout_prob)
@@ -82,7 +176,7 @@ class SelfAttentionBlock(nn.Module):
     def __init__(self, channels, num_heads=4):
         super().__init__()
         self.num_heads = num_heads
-        self.norm = nn.GroupNorm(8, channels)
+        self.norm = nn.GroupNorm(8 if channels % 8 == 0 else channels, channels)
         self.to_qkv = nn.Conv3d(channels, channels * 3, 1)
         self.proj_out = nn.Conv3d(channels, channels, 1)
 
@@ -105,7 +199,7 @@ class CrossAttentionBlock(nn.Module):
     def __init__(self, channels, context_dim, num_heads=4):
         super().__init__()
         self.num_heads = num_heads
-        self.norm = nn.GroupNorm(8, channels)
+        self.norm = nn.GroupNorm(8 if channels % 8 == 0 else channels, channels)
         self.to_q = nn.Conv3d(channels, channels, 1)
         self.to_kv = nn.Linear(context_dim, channels * 2)
         self.proj_out = nn.Conv3d(channels, channels, 1)
@@ -130,27 +224,27 @@ class CrossAttentionBlock(nn.Module):
 
 class DownBlock(nn.Module):
     """A downsampling block for the 3D U-Net."""
-    def __init__(self, in_channels, out_channels, time_emb_dim, context_dim, dropout_prob, has_attn=False, num_res_blocks=2):
+    def __init__(self, in_channels, out_channels, time_embedding_dim, context_dim, dropout_prob, has_attn=False, num_res_blocks=2):
         super().__init__()
         self.res_blocks = nn.ModuleList()
         self.attn_blocks = nn.ModuleList()
         for i in range(num_res_blocks):
             block_in_ch = in_channels if i == 0 else out_channels
-            self.res_blocks.append(ResidualBlock(block_in_ch, out_channels, time_emb_dim, dropout_prob))
+            self.res_blocks.append(ResidualBlock(block_in_ch, out_channels, time_embedding_dim, dropout_prob))
             if has_attn:
                 self.attn_blocks.append(nn.ModuleList([SelfAttentionBlock(out_channels), CrossAttentionBlock(out_channels, context_dim)]))
             else:
                 self.attn_blocks.append(nn.ModuleList([nn.Identity(), nn.Identity()]))
         # Using a larger horizontal kernel to capture larger spatial patterns,
         # while maintaining a balanced stride for gradual downsampling.
-        self.downsample = PartialConv3d(out_channels, out_channels, kernel_size=(3, 7, 7), stride=(2, 2, 2), padding=(1, 3, 3))
+        self.downsample = PartialConv3d(out_channels, out_channels, kernel_size=(3, 7, 7), stride=(2, 3, 3), padding=(1, 3, 3))
 
     def forward(self, x, time_emb, mask, context=None, use_checkpointing=False):
         skip_outputs = []
         for res_block, (self_attn, cross_attn) in zip(self.res_blocks, self.attn_blocks):
             # Apply gradient checkpointing here 
             if use_checkpointing:
-                x, mask = checkpoint(res_block, x, time_emb, mask)
+                x, mask = checkpoint(res_block, x, time_emb, mask, use_reentrant=False)
             else:
                 x, mask = res_block(x, time_emb, mask)
             
@@ -165,7 +259,7 @@ class DownBlock(nn.Module):
 
 class UpBlock(nn.Module):
     """An upsampling block for the 3D U-Net."""
-    def __init__(self, in_channels, skip_channels_in, out_channels, time_emb_dim, context_dim, dropout_prob, has_attn=False, num_res_blocks=2):
+    def __init__(self, in_channels, skip_channels_in, out_channels, time_embedding_dim, context_dim, dropout_prob, has_attn=False, num_res_blocks=2):
         super().__init__()
         # Instead of ConvTranspose3d, we use a standard convolution.
         # The upsampling will be handled by F.interpolate in the forward pass.
@@ -176,7 +270,7 @@ class UpBlock(nn.Module):
         total_in_channels = out_channels + skip_channels_in
         for i in range(num_res_blocks):
             block_in_ch = total_in_channels if i == 0 else out_channels
-            self.res_blocks.append(ResidualBlock(block_in_ch, out_channels, time_emb_dim, dropout_prob))
+            self.res_blocks.append(ResidualBlock(block_in_ch, out_channels, time_embedding_dim, dropout_prob))
             if has_attn:
                 self.attn_blocks.append(nn.ModuleList([SelfAttentionBlock(out_channels), CrossAttentionBlock(out_channels, context_dim)]))
             else:
@@ -189,24 +283,18 @@ class UpBlock(nn.Module):
         target_shape = skip_ref.shape[-3:]
 
         # Upsample the input tensor 'x' and its mask to the target shape.
-        # F.interpolate is used instead of ConvTranspose3d to avoid checkerboard artifacts
-        # and to guarantee the output size matches the skip connection's size perfectly.
         x = F.interpolate(x, size=target_shape, mode='trilinear', align_corners=False)
         mask = F.interpolate(mask, size=target_shape, mode='nearest')
         
-        # Now that 'x' has the same spatial dimensions as the skip connections,
-        # we can apply a convolution.
         x, mask = self.conv_after_upsample(x, mask)
         
-        # Concatenate the upsampled tensor with all the skip connections from the corresponding DownBlock.
-        # This is guaranteed to work because we explicitly matched the sizes above.
         x = torch.cat([x] + skip_xs, dim=1)
 
         mask = mask[:, :1, :, :, :].repeat(1, x.shape[1], 1, 1, 1)
 
         for res_block, (self_attn, cross_attn) in zip(self.res_blocks, self.attn_blocks):
             if use_checkpointing:
-                x, mask = checkpoint(res_block, x, time_emb, mask)
+                x, mask = checkpoint(res_block, x, time_emb, mask, use_reentrant=False)
             else:
                 x, mask = res_block(x, time_emb, mask)
 
@@ -217,6 +305,9 @@ class UpBlock(nn.Module):
         return x, mask
 
 class UNet(nn.Module):
+    # FIX: Use a class attribute for the logging flag to share it across DataParallel replicas
+    _has_logged_forward = False
+
     def __init__(self, config, verbose_init=False):
         super().__init__()
         self.in_channels = config.channels
@@ -224,10 +315,10 @@ class UNet(nn.Module):
         self.location_embedding_channels = config.location_embedding_channels
         self.conditioning_configs = config.conditioning_configs
         self.verbose_init = verbose_init
-        self.has_logged_forward = False
-        #  Add flag for checkpointing
         self.use_checkpointing = getattr(config, 'use_checkpointing', False)
         
+        self.use_vertical_conv = getattr(config, 'use_vertical_conv', False)
+
         base_channels = config.base_unet_channels
         time_embedding_dim = base_channels * 4
         
@@ -246,7 +337,21 @@ class UNet(nn.Module):
                 total_condition_dim += emb_dim
         self.context_dim = total_condition_dim
 
-        initial_conv_in_channels = self.in_channels + self.location_embedding_channels
+        if self.use_vertical_conv:
+            if self.verbose_init: print("Initializing UNet with Vertical Convolution Preprocessing.")
+            vertical_out_channels = getattr(config, 'vertical_conv_out_channels', base_channels)
+            self.vertical_preprocessor = VerticalConvModule(
+                in_channels=self.in_channels, 
+                out_channels=vertical_out_channels,
+                num_blocks=getattr(config, 'vertical_conv_num_blocks', 2),
+                dropout_prob=config.dropout_prob
+            )
+            initial_conv_in_channels = vertical_out_channels + self.location_embedding_channels
+        else:
+            if self.verbose_init: print("Initializing UNet with standard 3D convolutions.")
+            self.vertical_preprocessor = None
+            initial_conv_in_channels = self.in_channels + self.location_embedding_channels
+
         self.initial_conv = PartialConv3d(initial_conv_in_channels, base_channels, kernel_size=3, padding=1)
 
         self.down_stages = nn.ModuleList()
@@ -261,8 +366,13 @@ class UNet(nn.Module):
             out_ch = base_channels * multiplier
             has_attn = (h // (2**i)) in attn_resolutions
             self.down_stages.append(DownBlock(
-                current_channels, out_ch, time_embedding_dim, self.context_dim,
-                config.dropout_prob, has_attn, num_res_blocks
+                in_channels=current_channels,
+                out_channels=out_ch,
+                time_embedding_dim=time_embedding_dim,
+                context_dim=self.context_dim,
+                dropout_prob=config.dropout_prob,
+                has_attn=has_attn,
+                num_res_blocks=num_res_blocks
             ))
             current_channels = out_ch
         
@@ -281,24 +391,48 @@ class UNet(nn.Module):
             has_attn = (h // (2**i)) in attn_resolutions
             
             self.up_stages.append(UpBlock(
-                in_ch, skip_ch_in, out_ch, time_embedding_dim, self.context_dim,
-                config.dropout_prob, has_attn, num_res_blocks
+                in_channels=in_ch,
+                skip_channels_in=skip_ch_in,
+                out_channels=out_ch,
+                time_embedding_dim=time_embedding_dim,
+                context_dim=self.context_dim,
+                dropout_prob=config.dropout_prob,
+                has_attn=has_attn,
+                num_res_blocks=num_res_blocks
             ))
             current_channels = out_ch
 
         self.final_conv = nn.Conv3d(base_channels, self.out_channels, kernel_size=1)
 
-    def forward(self, x, t, mask, conditions=None, location_field=None, verbose_forward=True):
+    def forward(self, x, t, mask, conditions=None, location_field=None):
+        # FIX: The model now manages its own logging state internally using a class variable.
         is_main_process = not x.device.type == 'cuda' or x.device.index == 0
-        should_log = verbose_forward and not self.has_logged_forward
+        should_log = is_main_process and not UNet._has_logged_forward
 
-        if should_log and is_main_process:
+        if should_log:
             print("\n--- UNet Forward Pass (Actual Shapes) ---")
+            print(f"Initial Input 'x':     {x.shape}")
+            print(f"Initial Mask 'mask':   {mask.shape}")
+
+        current_features = x
+        current_mask_for_conv = mask 
+
+        if self.vertical_preprocessor is not None:
+            current_features, current_mask_for_conv = self.vertical_preprocessor(x, mask)
+            if should_log: 
+                print(f"After Vertical Conv (features): {current_features.shape}")
+                print(f"After Vertical Conv (mask):   {current_mask_for_conv.shape}")
 
         if self.location_embedding_channels > 0 and location_field is not None:
-            location_field_3d = location_field.unsqueeze(2).repeat(1, 1, x.shape[2], 1, 1)
-            x = torch.cat((x, location_field_3d), dim=1)
-            if should_log and is_main_process: print(f"After Location Concat: {x.shape}")
+            location_field_3d = location_field.unsqueeze(2).repeat(1, 1, current_features.shape[2], 1, 1)
+            current_features = torch.cat((current_features, location_field_3d), dim=1)
+            
+            location_mask_3d = torch.ones_like(location_field_3d)
+            current_mask_for_conv = torch.cat((current_mask_for_conv, location_mask_3d), dim=1)
+
+            if should_log: 
+                print(f"After Location Concat (features): {current_features.shape}")
+                print(f"After Location Concat (mask):   {current_mask_for_conv.shape}")
         
         time_emb = self.time_mlp(t)
         
@@ -308,47 +442,46 @@ class UNet(nn.Module):
             if context_embeddings:
                 context = torch.cat(context_embeddings, dim=1)
 
-        initial_mask = mask.repeat(1, x.shape[1], 1, 1, 1)
-        x, current_mask = self.initial_conv(x, initial_mask)
-        if should_log and is_main_process: print(f"After Initial Conv:    {x.shape}")
+        h, current_mask = self.initial_conv(current_features, current_mask_for_conv)
+        if should_log: print(f"After Initial Conv:    {h.shape}")
         
         skip_connections = []
         for i, stage in enumerate(self.down_stages):
-            if should_log and is_main_process: print(f"  [Down Stage {i+1}] Input:  {x.shape}")
-            x, current_mask, skips = stage(x, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
-            if should_log and is_main_process:
+            if should_log: print(f"  [Down Stage {i+1}] Input:  {h.shape}")
+            h, current_mask, skips = stage(h, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
+            if should_log:
                 print(f"  [Down Stage {i+1}] Skips:  {[s.shape for s in skips]}")
-                print(f"  [Down Stage {i+1}] Output: {x.shape}")
+                print(f"  [Down Stage {i+1}] Output: {h.shape}")
             skip_connections.append(skips)
         
-        if should_log and is_main_process: print(f"Bottleneck Input:        {x.shape}")
+        if should_log: print(f"Bottleneck Input:        {h.shape}")
         for layer in self.bottleneck:
             if isinstance(layer, ResidualBlock):
                 if self.use_checkpointing:
-                    x, current_mask = checkpoint(layer, x, time_emb, current_mask)
+                    # FIX: Use the modern, non-reentrant checkpointing implementation
+                    h, current_mask = checkpoint(layer, h, time_emb, current_mask, use_reentrant=False)
                 else:
-                    x, current_mask = layer(x, time_emb, current_mask)
+                    h, current_mask = layer(h, time_emb, current_mask)
             elif isinstance(layer, SelfAttentionBlock):
-                x, current_mask = layer(x, current_mask)
-        if should_log and is_main_process: print(f"Bottleneck Output:       {x.shape}")
+                h, current_mask = layer(h, current_mask)
+        if should_log: print(f"Bottleneck Output:       {h.shape}")
 
         for i, stage in enumerate(self.up_stages):
-            if should_log and is_main_process: print(f"  [Up Stage {i+1}] Input:    {x.shape}")
+            if should_log: print(f"  [Up Stage {i+1}] Input:    {h.shape}")
             skips_for_stage = skip_connections.pop()
-            if should_log and is_main_process: print(f"  [Up Stage {i+1}] Using Skips: {[s.shape for s in skips_for_stage]}")
-            x, current_mask = stage(x, skips_for_stage, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
-            if should_log and is_main_process: print(f"  [Up Stage {i+1}] Output:   {x.shape}")
+            if should_log: print(f"  [Up Stage {i+1}] Using Skips: {[s.shape for s in skips_for_stage]}")
+            h, current_mask = stage(h, skips_for_stage, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
+            if should_log: print(f"  [Up Stage {i+1}] Output:   {h.shape}")
 
-        output_prediction = self.final_conv(x)
+        output_prediction = self.final_conv(h)
         
         if should_log:
-            if is_main_process:
-                print(f"After Final Conv:      {output_prediction.shape}")
-                print("-----------------------------------------")
-            # Set the flag on ALL replicas after the first pass.
-            # On the next forward pass, should_log will be False for everyone.
-            self.has_logged_forward = True
+            print(f"After Final Conv:      {output_prediction.shape}")
+            print("-----------------------------------------")
+            # Set the shared class flag so no other replica will log during this run
+            UNet._has_logged_forward = True
         
+        # Apply the original single-channel mask to the final output.
         return output_prediction * mask
 
 def count_parameters(model):
