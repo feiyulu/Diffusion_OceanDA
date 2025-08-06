@@ -13,13 +13,41 @@ import collections.abc
 if not hasattr(collections, 'Container'):
     collections.Container = collections.abc.Container
 
-# Import components from other files
-from config import Config # Already imported
-from data_utils import load_ocean_data # Already imported
-from unet_model import UNet, count_parameters # count_parameters imported for model size
-from diffusion_process import Diffusion # Already imported
+from config import Config 
+from data_utils import get_time_coordinates, load_single_ocean_slice, load_static_data
+from unet_model import UNet, count_parameters 
+from diffusion_process import Diffusion 
 from training_utils import train_diffusion_model, create_training_animation
 from plotting_utils import plot_losses
+
+# Lazy-loading Dataset class
+class LazyOceanDataset(torch.utils.data.Dataset):
+    """
+    A PyTorch Dataset that loads data from disk on-the-fly ("lazily").
+    This is essential for datasets that are too large to fit into RAM.
+    """
+    def __init__(self, config, time_coords, land_mask, location_field): 
+        self.config = config
+        self.time_coords = time_coords
+        self.land_mask = land_mask
+        self.location_field = location_field
+
+    def __len__(self):
+        return len(self.time_coords)
+
+    def __getitem__(self, idx):
+        time_coord = self.time_coords[idx]
+        
+        # Load a single data slice and its conditions from disk
+        data_slice, conditions_at_idx = load_single_ocean_slice(self.config, time_coord)
+        
+        # Apply the static land mask 
+        # to ensure the output is 4D (C, D, H, W), not 5D.
+        data_slice_masked = data_slice * self.land_mask.squeeze(0)
+        
+        # Return the single sample. DataLoader will batch these together.
+        # Squeeze(0) removes the singleton batch dim from the static tensors.
+        return data_slice_masked, conditions_at_idx, self.location_field.squeeze(0), self.land_mask.squeeze(0)
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
@@ -43,38 +71,32 @@ if __name__ == "__main__":
 
     print(f"Using device: {config.device}")
     
-    # --- 1. Prepare Data ---
-    data, land_mask, conditional_data, location_field_data, _, _ = load_ocean_data(
-        config, time_range=config.training_day_range, is_test_data=False
-    )
-    print(f"Data tensor shape: {data.shape}")
-    print(f"Land mask tensor shape: {land_mask.shape}")
+    # --- 1. Prepare Data (NEW Lazy-Loading Method) ---
+    print("Preparing data using lazy-loading...")
+    
+    # Load static data (mask, location embeddings) once and keep in memory
+    land_mask, location_field_data = load_static_data(config)
+    print(f"Static land mask tensor shape: {land_mask.shape}")
+    
+    # Get the list of all time steps to determine dataset length without loading data
+    time_coords = get_time_coordinates(config)
+    print(f"Found {len(time_coords)} total time steps for training.")
 
-    class CustomOceanDataset(torch.utils.data.Dataset):
-        def __init__(self, data, conditional_data, location_field, land_mask): 
-            self.data = data
-            self.conditional_data = conditional_data
-            self.location_field = location_field
-            self.land_mask = land_mask
-
-        def __len__(self):
-            return len(self.data)
-
-        def __getitem__(self, idx):
-            conditions_at_idx = {key: val[idx] for key, val in self.conditional_data.items()}
-            # The location field and mask are static across all samples
-            return self.data[idx], conditions_at_idx, self.location_field.squeeze(0), self.land_mask.squeeze(0)
-
-    full_dataset = CustomOceanDataset(data, conditional_data, location_field_data, land_mask)
+    # Create the lazy-loading dataset instance
+    full_dataset = LazyOceanDataset(config, time_coords, land_mask, location_field_data)
+    
+    # Split into training and validation sets
     val_size = int(config.validation_split * len(full_dataset))
     train_size = len(full_dataset) - val_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+    # Create DataLoaders. num_workers > 0 is crucial for performance with lazy loading.
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     
+    # The animation part requires all data in memory, so it must be disabled in this mode.
     if config.generate_training_animation:
-        create_training_animation(data, land_mask, config)
+        print("Warning: Training animation generation is disabled for lazy-loading mode.")
 
     # --- 2. Initialize Model and Diffusion Process ---
     # UNet is now initialized directly with the config object

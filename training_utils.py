@@ -1,5 +1,5 @@
-# --- train_and_sample.py ---
-# This is the main script for training the model and performing conditional sampling.
+# --- training_utils.py ---
+# This file contains the main training loop for the model.
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -7,9 +7,9 @@ from torch.cuda.amp import GradScaler, autocast
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import numpy as np
-import os # Import the os module for path operations
-import imageio # For creating GIF animations
-from torch.utils.data import DataLoader, random_split # Import random_split
+import os 
+import imageio 
+from torch.utils.data import DataLoader, random_split 
 import xarray as xr
 import cartopy.crs as ccrs
 import wandb
@@ -54,7 +54,6 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
                 conditions_input = {k: v.to(config.device) for k, v in conditions_batch.items()}
                 loc_field_input = location_field_batch.to(config.device)
 
-                # FIX: Removed verbose_forward argument. The model now handles this internally.
                 predicted_epsilon = model(x_t, t, current_land_mask, 
                                           conditions=conditions_input, 
                                           location_field=loc_field_input)
@@ -77,6 +76,9 @@ def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer,
 
             total_train_loss += loss.item() * config.gradient_accumulation_steps
             pbar.set_postfix(loss=loss.item() * config.gradient_accumulation_steps)
+
+            # Explicitly delete tensors to prevent memory leaks 
+            del loss, predicted_epsilon, x_t, true_epsilon
 
         if (len(train_loader.dataset)) % config.gradient_accumulation_steps != 0:
             scaler.unscale_(optimizer)
