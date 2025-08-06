@@ -1,17 +1,16 @@
 # --- unet_model.py ---
 # This file defines the U-Net architecture, including the custom PartialConv3d layer.
+# UPDATED: Added Depth-to-Space unshuffling to reverse the initial pixel shuffle.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from torch.utils.checkpoint import checkpoint # Import checkpointing utility
+from torch.utils.checkpoint import checkpoint 
 
-# --- NEW: 1D Partial Convolution for Vertical Processing ---
 class PartialConv1d(nn.Conv1d):
     """A partial convolution layer for 1D data (used for the vertical dimension)."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # 1D kernel for updating the 1D mask
         self.register_buffer('sum_kernel', torch.ones(1, 1, self.kernel_size[0]))
         self.sum_kernel.requires_grad = False
         self.window_size = self.kernel_size[0]
@@ -34,17 +33,14 @@ class PartialConv1d(nn.Conv1d):
         final_mask = mask_out.repeat(1, self.out_channels, 1)
         return final_output, final_mask
 
-# Custom Partial Convolution Layer for handling masked regions
 class PartialConv3d(nn.Conv3d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # 3D kernel for updating the 3D mask
         self.register_buffer('sum_kernel', torch.ones(1, 1, self.kernel_size[0], self.kernel_size[1], self.kernel_size[2]))
         self.sum_kernel.requires_grad = False
         self.window_size = self.kernel_size[0] * self.kernel_size[1] * self.kernel_size[2]
 
     def forward(self, input_tensor, mask_in):
-        # A more robust implementation of partial convolution to prevent shape mismatches.
         masked_input = input_tensor * mask_in
         output = super().forward(masked_input)
 
@@ -92,13 +88,10 @@ class VerticalResBlock(nn.Module):
         h = self.norm1(h) * h_mask
         h = self.act1(h) * h_mask
         h = self.dropout(h)
-
         h, h_mask = self.conv2(h, h_mask)
         h = self.norm2(h) * h_mask
         h = self.act2(h) * h_mask
-
         residual, residual_mask = self.residual_conv(x, mask) if isinstance(self.residual_conv, PartialConv1d) else (self.residual_conv(x), mask)
-        
         combined_mask = h_mask * residual_mask
         return (h + residual) * combined_mask, combined_mask
 
@@ -107,38 +100,48 @@ class VerticalConvModule(nn.Module):
     def __init__(self, in_channels, out_channels, num_blocks=2, dropout_prob=0.1):
         super().__init__()
         self.blocks = nn.ModuleList()
-        
-        # First block maps input channels to output channels
         self.blocks.append(VerticalResBlock(in_channels, out_channels, dropout_prob))
-        
-        # Subsequent blocks map output channels to output channels
         for _ in range(num_blocks - 1):
             self.blocks.append(VerticalResBlock(out_channels, out_channels, dropout_prob))
 
     def forward(self, x, mask):
-        # x shape: (N, C, D, H, W)
-        # mask shape: (N, 1, D, H, W)
         N, C, D, H, W = x.shape
-        
-        # Reshape for vertical convolution: treat each (H, W) location as a batch element
-        # New shape: (N*H*W, C, D)
         x_reshaped = rearrange(x, 'n c d h w -> (n h w) c d')
-        
-        # Reshape mask similarly. Use only the first channel of the mask.
         mask_reshaped = rearrange(mask[:,:1], 'n c d h w -> (n h w) c d')
-        
         for block in self.blocks:
             x_reshaped, mask_reshaped = block(x_reshaped, mask_reshaped)
-
-        # Reshape back to original 3D structure
-        # (N*H*W, C_out, D) -> (N, C_out, D, H, W)
         x_out = rearrange(x_reshaped, '(n h w) c d -> n c d h w', h=H, w=W)
-        
-        # Also reshape the final processed mask and return it
         mask_out = rearrange(mask_reshaped, '(n h w) c d -> n c d h w', h=H, w=W)
-        
         return x_out, mask_out
 
+class PixelShuffleSpaceToDepth(nn.Module):
+    """
+    Performs a Space-to-Depth transformation by rearranging pixels from a spatial block 
+    into the channel dimension. This is a parameter-free, lossless operation.
+    """
+    def __init__(self, shuffle_size):
+        super().__init__()
+        self.shuffle_d, self.shuffle_h, self.shuffle_w = shuffle_size
+
+    def forward(self, x, mask):
+        x_shuffled = rearrange(x, 'b c (d p1) (h p2) (w p3) -> b (c p1 p2 p3) d h w', 
+                              p1=self.shuffle_d, p2=self.shuffle_h, p3=self.shuffle_w)
+        mask_shuffled = rearrange(mask, 'b c (d p1) (h p2) (w p3) -> b (c p1 p2 p3) d h w', 
+                                 p1=self.shuffle_d, p2=self.shuffle_h, p3=self.shuffle_w)
+        return x_shuffled, mask_shuffled
+
+class PixelShuffleDepthToSpace(nn.Module):
+    """
+    Performs a Depth-to-Space transformation, the inverse of PixelShuffleSpaceToDepth.
+    """
+    def __init__(self, shuffle_size):
+        super().__init__()
+        self.shuffle_d, self.shuffle_h, self.shuffle_w = shuffle_size
+
+    def forward(self, x):
+        x_unshuffled = rearrange(x, 'b (c p1 p2 p3) d h w -> b c (d p1) (h p2) (w p3)',
+                                 p1=self.shuffle_d, p2=self.shuffle_h, p3=self.shuffle_w)
+        return x_unshuffled
 
 class ResidualBlock(nn.Module):
     """A residual block with two 3D partial convolutions and time conditioning."""
@@ -163,11 +166,9 @@ class ResidualBlock(nn.Module):
             h = h * (1 + scale) + shift
         h, h_mask = self.conv2(h, h_mask); h = self.norm2(h); h = self.act2(h); h = self.dropout(h)
         residual, residual_mask = self.residual_conv(x, mask) if isinstance(self.residual_conv, PartialConv3d) else (self.residual_conv(x), mask)
-        
         if h.shape != residual.shape:
              residual = F.interpolate(residual, size=h.shape[-3:], mode='trilinear', align_corners=False)
              residual_mask = F.interpolate(residual_mask, size=h_mask.shape[-3:], mode='nearest')
-
         combined_mask = h_mask * residual_mask
         return (h + residual) * combined_mask, combined_mask
 
@@ -209,22 +210,19 @@ class CrossAttentionBlock(nn.Module):
         x_norm = self.norm(x)
         q = self.to_q(x_norm)
         q = rearrange(q, 'n (h c) d y x -> n h (d y x) c', h=self.num_heads)
-        
         k, v = self.to_kv(context).chunk(2, dim=-1)
         k = rearrange(k, 'n (h c) -> n h () c', h=self.num_heads)
         v = rearrange(v, 'n (h c) -> n h () c', h=self.num_heads)
-        
-        attn_scores = torch.einsum('nhic,nhjc->nhij', q, k) * (q.shape[-1])**-0.5
-        attn_probs = F.softmax(attn_scores, dim=-1)
-
-        out = torch.einsum('nhij,nhjc->nhic', attn_probs, v)
+        dots = torch.matmul(q, k.transpose(-1, -2)) * (q.shape[-1]**-0.5)
+        attn = F.softmax(dots, dim=-1)
+        out = torch.matmul(attn, v)
         out = rearrange(out, 'n h (d y x) c -> n (h c) d y x', d=D, y=H, x=W)
         out = self.proj_out(out)
         return (x + out) * mask, mask
 
 class DownBlock(nn.Module):
     """A downsampling block for the 3D U-Net."""
-    def __init__(self, in_channels, out_channels, time_embedding_dim, context_dim, dropout_prob, has_attn=False, num_res_blocks=2):
+    def __init__(self, in_channels, out_channels, time_embedding_dim, context_dim, dropout_prob, has_attn=False, num_res_blocks=2, downsample_depth=True):
         super().__init__()
         self.res_blocks = nn.ModuleList()
         self.attn_blocks = nn.ModuleList()
@@ -235,23 +233,31 @@ class DownBlock(nn.Module):
                 self.attn_blocks.append(nn.ModuleList([SelfAttentionBlock(out_channels), CrossAttentionBlock(out_channels, context_dim)]))
             else:
                 self.attn_blocks.append(nn.ModuleList([nn.Identity(), nn.Identity()]))
-        # Using a larger horizontal kernel to capture larger spatial patterns,
-        # while maintaining a balanced stride for gradual downsampling.
-        self.downsample = PartialConv3d(out_channels, out_channels, kernel_size=(3, 7, 7), stride=(2, 3, 3), padding=(1, 3, 3))
+        
+        if downsample_depth:
+            self.downsample = PartialConv3d(out_channels, out_channels, kernel_size=(3, 7, 7), stride=(2, 2, 2), padding=(1, 3, 3))
+        else:
+            self.downsample = PartialConv3d(out_channels, out_channels, kernel_size=(1, 7, 7), stride=(1, 2, 2), padding=(0, 3, 3))
 
-    def forward(self, x, time_emb, mask, context=None, use_checkpointing=False):
+    def forward(self, x, time_emb, mask, context=None, use_checkpointing=False, should_log=False, stage_name=""):
         skip_outputs = []
-        for res_block, (self_attn, cross_attn) in zip(self.res_blocks, self.attn_blocks):
-            # Apply gradient checkpointing here 
+        for i, (res_block, (self_attn, cross_attn)) in enumerate(zip(self.res_blocks, self.attn_blocks)):
             if use_checkpointing:
                 x, mask = checkpoint(res_block, x, time_emb, mask, use_reentrant=False)
             else:
                 x, mask = res_block(x, time_emb, mask)
             
+            if should_log:
+                print(f"    {stage_name} ResBlock {i+1} Out: {x.shape}")
+
             if isinstance(self_attn, SelfAttentionBlock):
                 x, mask = self_attn(x, mask)
+                if should_log:
+                    print(f"    {stage_name} SelfAttn Out: {x.shape}")
             if isinstance(cross_attn, CrossAttentionBlock) and context is not None:
                 x, mask = cross_attn(x, context, mask)
+                if should_log:
+                    print(f"    {stage_name} CrossAttn Out: {x.shape}")
             skip_outputs.append(x)
         
         x_down, mask_down = self.downsample(x, mask)
@@ -261,10 +267,7 @@ class UpBlock(nn.Module):
     """An upsampling block for the 3D U-Net."""
     def __init__(self, in_channels, skip_channels_in, out_channels, time_embedding_dim, context_dim, dropout_prob, has_attn=False, num_res_blocks=2):
         super().__init__()
-        # Instead of ConvTranspose3d, we use a standard convolution.
-        # The upsampling will be handled by F.interpolate in the forward pass.
         self.conv_after_upsample = PartialConv3d(in_channels, out_channels, kernel_size=3, padding=1)
-
         self.res_blocks = nn.ModuleList()
         self.attn_blocks = nn.ModuleList()
         total_in_channels = out_channels + skip_channels_in
@@ -276,36 +279,38 @@ class UpBlock(nn.Module):
             else:
                 self.attn_blocks.append(nn.ModuleList([nn.Identity(), nn.Identity()]))
 
-    def forward(self, x, skip_xs, time_emb, mask, context=None, use_checkpointing=False):
-        # Get the spatial shape (D, H, W) from the corresponding skip connection tensor.
-        # This is the target shape we need to upsample our current tensor 'x' to.
+    def forward(self, x, skip_xs, time_emb, mask, context=None, use_checkpointing=False, should_log=False, stage_name=""):
         skip_ref = skip_xs[0]
         target_shape = skip_ref.shape[-3:]
-
-        # Upsample the input tensor 'x' and its mask to the target shape.
         x = F.interpolate(x, size=target_shape, mode='trilinear', align_corners=False)
         mask = F.interpolate(mask, size=target_shape, mode='nearest')
-        
         x, mask = self.conv_after_upsample(x, mask)
-        
         x = torch.cat([x] + skip_xs, dim=1)
-
+        if should_log:
+            print(f"    {stage_name} After Skip Concat: {x.shape}")
+        
         mask = mask[:, :1, :, :, :].repeat(1, x.shape[1], 1, 1, 1)
 
-        for res_block, (self_attn, cross_attn) in zip(self.res_blocks, self.attn_blocks):
+        for i, (res_block, (self_attn, cross_attn)) in enumerate(zip(self.res_blocks, self.attn_blocks)):
             if use_checkpointing:
                 x, mask = checkpoint(res_block, x, time_emb, mask, use_reentrant=False)
             else:
                 x, mask = res_block(x, time_emb, mask)
+            
+            if should_log:
+                print(f"    {stage_name} ResBlock {i+1} Out: {x.shape}")
 
             if isinstance(self_attn, SelfAttentionBlock):
                 x, mask = self_attn(x, mask)
+                if should_log:
+                    print(f"    {stage_name} SelfAttn Out: {x.shape}")
             if isinstance(cross_attn, CrossAttentionBlock) and context is not None:
                 x, mask = cross_attn(x, context, mask)
+                if should_log:
+                    print(f"    {stage_name} CrossAttn Out: {x.shape}")
         return x, mask
 
 class UNet(nn.Module):
-    # FIX: Use a class attribute for the logging flag to share it across DataParallel replicas
     _has_logged_forward = False
 
     def __init__(self, config, verbose_init=False):
@@ -318,6 +323,7 @@ class UNet(nn.Module):
         self.use_checkpointing = getattr(config, 'use_checkpointing', False)
         
         self.use_vertical_conv = getattr(config, 'use_vertical_conv', False)
+        self.use_pixel_shuffling = getattr(config, 'use_pixel_shuffling', False)
 
         base_channels = config.base_unet_channels
         time_embedding_dim = base_channels * 4
@@ -337,8 +343,13 @@ class UNet(nn.Module):
                 total_condition_dim += emb_dim
         self.context_dim = total_condition_dim
 
+        self.vertical_preprocessor = None
+        self.pixel_shuffler = None
+        self.pixel_unshuffler = None
+        current_conv_channels = self.in_channels
+
         if self.use_vertical_conv:
-            if self.verbose_init: print("Initializing UNet with Vertical Convolution Preprocessing.")
+            if self.verbose_init: print("Initializing with Vertical Convolution Preprocessing.")
             vertical_out_channels = getattr(config, 'vertical_conv_out_channels', base_channels)
             self.vertical_preprocessor = VerticalConvModule(
                 in_channels=self.in_channels, 
@@ -346,33 +357,35 @@ class UNet(nn.Module):
                 num_blocks=getattr(config, 'vertical_conv_num_blocks', 2),
                 dropout_prob=config.dropout_prob
             )
-            initial_conv_in_channels = vertical_out_channels + self.location_embedding_channels
-        else:
-            if self.verbose_init: print("Initializing UNet with standard 3D convolutions.")
-            self.vertical_preprocessor = None
-            initial_conv_in_channels = self.in_channels + self.location_embedding_channels
+            current_conv_channels = vertical_out_channels
+        
+        if self.use_pixel_shuffling:
+            if self.verbose_init: print("Initializing with Pixel Shuffling (Space-to-Depth).")
+            self.pixel_shuffler = PixelShuffleSpaceToDepth(config.pixel_shuffle_size)
+            self.pixel_unshuffler = PixelShuffleDepthToSpace(config.pixel_shuffle_size)
+            shuffle_d, shuffle_h, shuffle_w = config.pixel_shuffle_size
+            current_conv_channels *= (shuffle_d * shuffle_h * shuffle_w)
 
+        initial_conv_in_channels = current_conv_channels + self.location_embedding_channels
         self.initial_conv = PartialConv3d(initial_conv_in_channels, base_channels, kernel_size=3, padding=1)
-
+        
         self.down_stages = nn.ModuleList()
         current_channels = base_channels
         channel_multipliers = getattr(config, 'channel_multipliers', (1, 2, 4, 8))
         num_res_blocks = getattr(config, 'num_res_blocks', 2)
         attn_resolutions = getattr(config, 'attn_resolutions', (16,))
-        
         d, h, w = config.data_shape
+        num_depth_downsamples = getattr(config, 'num_depth_downsamples', len(channel_multipliers))
 
         for i, multiplier in enumerate(channel_multipliers):
             out_ch = base_channels * multiplier
-            has_attn = (h // (2**i)) in attn_resolutions
+            has_attn = (h // (2**(i + (1 if self.use_pixel_shuffling else 0)))) in attn_resolutions
+            should_downsample_depth = i < num_depth_downsamples
             self.down_stages.append(DownBlock(
-                in_channels=current_channels,
-                out_channels=out_ch,
-                time_embedding_dim=time_embedding_dim,
-                context_dim=self.context_dim,
-                dropout_prob=config.dropout_prob,
-                has_attn=has_attn,
-                num_res_blocks=num_res_blocks
+                in_channels=current_channels, out_channels=out_ch,
+                time_embedding_dim=time_embedding_dim, context_dim=self.context_dim,
+                dropout_prob=config.dropout_prob, has_attn=has_attn,
+                num_res_blocks=num_res_blocks, downsample_depth=should_downsample_depth
             ))
             current_channels = out_ch
         
@@ -388,24 +401,22 @@ class UNet(nn.Module):
             in_ch = channel_multipliers[i+1] * base_channels if i + 1 < len(channel_multipliers) else current_channels
             out_ch = base_channels * multiplier
             skip_ch_in = out_ch * num_res_blocks
-            has_attn = (h // (2**i)) in attn_resolutions
-            
+            has_attn = (h // (2**(i + (1 if self.use_pixel_shuffling else 0)))) in attn_resolutions
             self.up_stages.append(UpBlock(
-                in_channels=in_ch,
-                skip_channels_in=skip_ch_in,
-                out_channels=out_ch,
-                time_embedding_dim=time_embedding_dim,
-                context_dim=self.context_dim,
-                dropout_prob=config.dropout_prob,
-                has_attn=has_attn,
-                num_res_blocks=num_res_blocks
+                in_channels=in_ch, skip_channels_in=skip_ch_in, out_channels=out_ch,
+                time_embedding_dim=time_embedding_dim, context_dim=self.context_dim,
+                dropout_prob=config.dropout_prob, has_attn=has_attn, num_res_blocks=num_res_blocks
             ))
             current_channels = out_ch
 
-        self.final_conv = nn.Conv3d(base_channels, self.out_channels, kernel_size=1)
+        # --- FIX: Ensure final conv outputs enough channels for the unshuffling operation ---
+        final_conv_out_channels = self.out_channels
+        if self.use_pixel_shuffling:
+            shuffle_d, shuffle_h, shuffle_w = config.pixel_shuffle_size
+            final_conv_out_channels *= (shuffle_d * shuffle_h * shuffle_w)
+        self.final_conv = nn.Conv3d(base_channels, final_conv_out_channels, kernel_size=1)
 
     def forward(self, x, t, mask, conditions=None, location_field=None):
-        # FIX: The model now manages its own logging state internally using a class variable.
         is_main_process = not x.device.type == 'cuda' or x.device.index == 0
         should_log = is_main_process and not UNet._has_logged_forward
 
@@ -423,8 +434,18 @@ class UNet(nn.Module):
                 print(f"After Vertical Conv (features): {current_features.shape}")
                 print(f"After Vertical Conv (mask):   {current_mask_for_conv.shape}")
 
+        if self.pixel_shuffler is not None:
+            current_features, current_mask_for_conv = self.pixel_shuffler(current_features, current_mask_for_conv)
+            if should_log:
+                print(f"After Pixel Shuffling (features): {current_features.shape}")
+                print(f"After Pixel Shuffling (mask):   {current_mask_for_conv.shape}")
+
         if self.location_embedding_channels > 0 and location_field is not None:
-            location_field_3d = location_field.unsqueeze(2).repeat(1, 1, current_features.shape[2], 1, 1)
+            _, _, d, h, w = current_features.shape
+            if location_field.shape[-2:] != (h, w):
+                location_field = F.avg_pool2d(location_field, kernel_size=(location_field.shape[-2]//h, location_field.shape[-1]//w))
+            
+            location_field_3d = location_field.unsqueeze(2).repeat(1, 1, d, 1, 1)
             current_features = torch.cat((current_features, location_field_3d), dim=1)
             
             location_mask_3d = torch.ones_like(location_field_3d)
@@ -447,18 +468,18 @@ class UNet(nn.Module):
         
         skip_connections = []
         for i, stage in enumerate(self.down_stages):
-            if should_log: print(f"  [Down Stage {i+1}] Input:  {h.shape}")
-            h, current_mask, skips = stage(h, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
+            stage_name = f"[Down Stage {i+1}]"
+            if should_log: print(f"  {stage_name} Input:  {h.shape}")
+            h, current_mask, skips = stage(h, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing, should_log=should_log, stage_name=stage_name)
             if should_log:
-                print(f"  [Down Stage {i+1}] Skips:  {[s.shape for s in skips]}")
-                print(f"  [Down Stage {i+1}] Output: {h.shape}")
+                print(f"  {stage_name} Skips:  {[s.shape for s in skips]}")
+                print(f"  {stage_name} Output: {h.shape}")
             skip_connections.append(skips)
         
         if should_log: print(f"Bottleneck Input:        {h.shape}")
         for layer in self.bottleneck:
             if isinstance(layer, ResidualBlock):
                 if self.use_checkpointing:
-                    # FIX: Use the modern, non-reentrant checkpointing implementation
                     h, current_mask = checkpoint(layer, h, time_emb, current_mask, use_reentrant=False)
                 else:
                     h, current_mask = layer(h, time_emb, current_mask)
@@ -467,21 +488,26 @@ class UNet(nn.Module):
         if should_log: print(f"Bottleneck Output:       {h.shape}")
 
         for i, stage in enumerate(self.up_stages):
-            if should_log: print(f"  [Up Stage {i+1}] Input:    {h.shape}")
+            stage_name = f"[Up Stage {i+1}]"
+            if should_log: print(f"  {stage_name} Input:    {h.shape}")
             skips_for_stage = skip_connections.pop()
-            if should_log: print(f"  [Up Stage {i+1}] Using Skips: {[s.shape for s in skips_for_stage]}")
-            h, current_mask = stage(h, skips_for_stage, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing)
-            if should_log: print(f"  [Up Stage {i+1}] Output:   {h.shape}")
+            if should_log: print(f"  {stage_name} Using Skips: {[s.shape for s in skips_for_stage]}")
+            h, current_mask = stage(h, skips_for_stage, time_emb, current_mask, context, use_checkpointing=self.use_checkpointing, should_log=should_log, stage_name=stage_name)
+            if should_log: print(f"  {stage_name} Output:   {h.shape}")
 
         output_prediction = self.final_conv(h)
-        
         if should_log:
             print(f"After Final Conv:      {output_prediction.shape}")
+        
+        if self.pixel_unshuffler is not None:
+            output_prediction = self.pixel_unshuffler(output_prediction)
+            if should_log:
+                print(f"After Pixel Unshuffling: {output_prediction.shape}")
+
+        if should_log:
             print("-----------------------------------------")
-            # Set the shared class flag so no other replica will log during this run
             UNet._has_logged_forward = True
         
-        # Apply the original single-channel mask to the final output.
         return output_prediction * mask
 
 def count_parameters(model):

@@ -46,9 +46,12 @@ class Config:
         use_vertical_conv=False, 
         vertical_conv_num_blocks=2,
         vertical_conv_out_channels=None,
+        use_pixel_shuffling=False,
+        pixel_shuffle_size=(1, 4, 4),
         base_unet_channels=32,
         channel_multipliers=(1, 2, 4, 8),
-        attn_resolutions=(8,), # Resolutions at which to use attention blocks
+        num_depth_downsamples=None, 
+        attn_resolutions=(8,), 
         num_res_blocks=2,
 
         # --- Training Parameters ---
@@ -163,7 +166,11 @@ class Config:
         self.base_unet_channels = base_unet_channels
         self.vertical_conv_out_channels = vertical_conv_out_channels \
             if vertical_conv_out_channels is not None else self.base_unet_channels
+        self.use_pixel_shuffling = use_pixel_shuffling 
+        self.pixel_shuffle_size = pixel_shuffle_size
         self.channel_multipliers = channel_multipliers
+        self.num_depth_downsamples = num_depth_downsamples \
+            if num_depth_downsamples is not None else len(self.channel_multipliers)
         self.attn_resolutions = attn_resolutions
         self.num_res_blocks = num_res_blocks
         self.dropout_prob = dropout_prob
@@ -242,7 +249,7 @@ class Config:
             raise FileNotFoundError(f"Config file not found: {filepath}")
         with open(filepath, 'r') as f:
             settings = json.load(f)
-        for key in ['data_shape', 'channel_multipliers', 'attn_resolutions']:
+        for key in ['data_shape', 'channel_multipliers', 'attn_resolutions', 'pixel_shuffle_size']:
             if key in settings and isinstance(settings[key], list):
                 settings[key] = tuple(settings[key])
         return cls(**settings)
