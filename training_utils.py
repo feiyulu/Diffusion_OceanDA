@@ -1,5 +1,6 @@
 # --- training_utils.py ---
 # This file contains the main training loop for the model.
+# UPDATED: Re-implemented checkpointing using Accelerate's save_state.
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -15,20 +16,25 @@ import cartopy.crs as ccrs
 import wandb
 import seaborn
 from plotting_utils import plot_losses
+import json
 
 # --- Training Function ---
-def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config):
+def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config, initial_train_losses=None, initial_val_losses=None):
     """
     Trains the 3D diffusion U-Net model with memory optimization techniques.
     """
     model.train()
     if accelerator.is_main_process:
         print("Starting training...")
-    train_losses, val_losses = [], []
+    
+    # Initialize loss lists from checkpoint if provided
+    train_losses = initial_train_losses if initial_train_losses is not None else []
+    val_losses = initial_val_losses if initial_val_losses is not None else []
+    
     if accelerator.is_main_process:
         os.makedirs(config.model_checkpoint_dir, exist_ok=True)
         os.makedirs(config.loss_plot_dir, exist_ok=True)
-    
+
     # Define the threshold for gradient clipping
     gradient_clip_val = 1.0
     if accelerator.is_main_process:
@@ -39,9 +45,9 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
         # Wrap the data loader with the accelerator for progress bar on main process
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Training)", disable=not accelerator.is_main_process)
         
-        for batch_idx, (x_0, conditions_batch, location_field_batch, land_mask_batch) in enumerate(pbar):            
+        for batch_idx, (x_0, conditions_batch, location_field_batch, land_mask_batch) in enumerate(pbar):
             with accelerator.accumulate(model):
-                t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=accelerator.device).long()                
+                t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=accelerator.device).long()
                 x_t, true_epsilon = diffusion.noise_images(x_0, t, land_mask_batch)
                 conditions_input = {k: v for k, v in conditions_batch.items()}
                 loc_field_input = location_field_batch
@@ -107,17 +113,17 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                 wandb.log(log_dict)
             
             if (epoch + 1) % config.save_interval == 0:
-                checkpoint_path = os.path.join(config.model_checkpoint_dir, f"ODA_ch{config.channels}_{config.test_id}_epoch_{epoch+1}.pth")
-                print(f"Saving checkpoint to {checkpoint_path}...")
+                print(f"Saving checkpoint for epoch {epoch+1} to {config.model_checkpoint_dir}...")
+                accelerator.save_state(config.model_checkpoint_dir)
                 
-                # Unwrap model before saving state dict
-                unwrapped_model = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': epoch, 'model_state_dict': unwrapped_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                    'train_losses': train_losses, 'val_losses': val_losses
-                }, checkpoint_path)
+                training_state = {
+                    'epoch': epoch,
+                    'train_losses': train_losses,
+                    'val_losses': val_losses
+                }
+                with open(os.path.join(config.model_checkpoint_dir, "training_state.json"), 'w') as f:
+                    json.dump(training_state, f)
+
                 print("Checkpoint saved.")
                 plot_losses(train_losses, val_losses, os.path.join(config.loss_plot_dir, f"loss_plot_{config.test_id}_epoch_{epoch+1}.png"))
         

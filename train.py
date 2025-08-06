@@ -133,8 +133,23 @@ if __name__ == "__main__":
 
     # --- 3. Load Checkpoint and Train ---
     start_epoch, train_losses, val_losses = 0, [], []
-    # Checkpoint loading logic will be handled by Accelerate if needed in the future
-    print("No existing checkpoint found. Starting training from scratch.")
+    # Use Accelerate's logic for loading checkpoints
+    accelerate_checkpoint_file = os.path.join(config.model_checkpoint_dir, "pytorch_model.bin")
+    if os.path.exists(accelerate_checkpoint_file):
+        print(f"Resuming training from checkpoint: {config.model_checkpoint_dir}...")
+        accelerator.load_state(config.model_checkpoint_dir)
+        
+        # Load custom training state (epoch, losses) from a separate JSON file
+        state_path = os.path.join(config.model_checkpoint_dir, "training_state.json")
+        if os.path.exists(state_path):
+            with open(state_path, 'r') as f:
+                training_state = json.load(f)
+            start_epoch = training_state['epoch'] + 1
+            train_losses = training_state.get('train_losses', [])
+            val_losses = training_state.get('val_losses', [])
+            print(f"Training will resume from epoch {start_epoch}.")
+    else:
+        print("No existing checkpoint found. Starting training from scratch.")
 
     # Add start_epoch to config for the training function
     config.start_epoch = start_epoch
