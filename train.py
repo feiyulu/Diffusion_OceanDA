@@ -6,9 +6,11 @@ import os
 import argparse
 import wandb
 from torch.utils.data import DataLoader, random_split
-import torch.nn as nn # Import the nn module
+import torch.nn as nn 
 import collections
 import collections.abc
+from accelerate import Accelerator
+
 # This resolves the "AttributeError: module 'collections' has no attribute 'Container'"
 if not hasattr(collections, 'Container'):
     collections.Container = collections.abc.Container
@@ -63,24 +65,30 @@ if __name__ == "__main__":
         print(e)
         raise Exception(f"Please ensure '{config_path}' exists.")
 
-    if config.use_wandb:
+    accelerator = Accelerator(gradient_accumulation_steps=config.gradient_accumulation_steps)
+
+    if config.use_wandb and accelerator.is_main_process:
         mode = "offline" if config.wandb_offline else "online"
         wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=vars(config), mode=mode)
         wandb.run.name = config.test_id
         print(f"Weights & Biases initialized in '{mode}' mode.")
 
-    print(f"Using device: {config.device}")
+    device = accelerator.device
+    print(f"Using device: {device}")
     
     # --- 1. Prepare Data (NEW Lazy-Loading Method) ---
-    print("Preparing data using lazy-loading...")
+    if accelerator.is_main_process:
+        print("Preparing data using lazy-loading...")
     
     # Load static data (mask, location embeddings) once and keep in memory
     land_mask, location_field_data = load_static_data(config)
-    print(f"Static land mask tensor shape: {land_mask.shape}")
+    if accelerator.is_main_process:
+        print(f"Static land mask tensor shape: {land_mask.shape}")
     
     # Get the list of all time steps to determine dataset length without loading data
     time_coords = get_time_coordinates(config)
-    print(f"Found {len(time_coords)} total time steps for training.")
+    if accelerator.is_main_process:
+        print(f"Found {len(time_coords)} total time steps for training.")
 
     # Create the lazy-loading dataset instance
     full_dataset = LazyOceanDataset(config, time_coords, land_mask, location_field_data)
@@ -94,22 +102,16 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     
-    # The animation part requires all data in memory, so it must be disabled in this mode.
-    if config.generate_training_animation:
+    if config.generate_training_animation and accelerator.is_main_process:
         print("Warning: Training animation generation is disabled for lazy-loading mode.")
 
     # --- 2. Initialize Model and Diffusion Process ---
     # UNet is now initialized directly with the config object
-    model = UNet(config, verbose_init=True).to(config.device)
-
-    use_data_parallel = getattr(config, 'use_data_parallel', False)
-    if use_data_parallel and torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs for training via DataParallel.")
-        model = nn.DataParallel(model)
+    model = UNet(config, verbose_init=accelerator.is_main_process)
 
     print(f"Total trainable parameters in UNet model: {count_parameters(model):,}")
 
-    if config.use_wandb:
+    if config.use_wandb and accelerator.is_main_process:
         wandb.watch(model, log='all', log_freq=200)
 
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
@@ -119,71 +121,50 @@ if __name__ == "__main__":
             optimizer, T_max=config.lr_scheduler_T_max, eta_min=config.lr_scheduler_eta_min
         )
 
+    # Prepare all components with the accelerator
+    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, val_loader, scheduler
+    )
+
     # Diffusion process no longer needs data_shape at initialization
     diffusion = Diffusion(
-        timesteps=config.timesteps, beta_start=config.beta_start, beta_end=config.beta_end, device=config.device
+        timesteps=config.timesteps, beta_start=config.beta_start, beta_end=config.beta_end, device=device
     )
 
     # --- 3. Load Checkpoint and Train ---
     start_epoch, train_losses, val_losses = 0, [], []
-    latest_checkpoint_path = None
-    if os.path.exists(config.model_checkpoint_dir):
-        checkpoints = [f for f in os.listdir(config.model_checkpoint_dir) if f.startswith(f"ODA_ch{config.channels}_{config.test_id}") and f.endswith(".pth")]
-        if checkpoints:
-            checkpoints.sort(key=lambda x: int(x.split('_epoch_')[1].split('.pth')[0]))
-            latest_checkpoint_path = os.path.join(config.model_checkpoint_dir, checkpoints[-1])
-
-    if latest_checkpoint_path:
-        print(f"Resuming training from checkpoint: {latest_checkpoint_path}...")
-        checkpoint = torch.load(latest_checkpoint_path, map_location=config.device)
-
-        state_dict = checkpoint['model_state_dict']
-        if use_data_parallel and not isinstance(model, nn.DataParallel):
-             # If checkpoint was saved with DataParallel but we are loading without it
-             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        elif not use_data_parallel and isinstance(model, nn.DataParallel):
-             # If checkpoint was saved without DataParallel but we are loading with it
-             state_dict = {'module.' + k: v for k, v in state_dict.items()}
-
-        model.load_state_dict(state_dict)
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if scheduler and 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        train_losses = checkpoint.get('train_losses', [])
-        val_losses = checkpoint.get('val_losses', [])
-        print(f"Training will resume from epoch {start_epoch}.")
-    else:
-        print("No existing checkpoint found. Starting training from scratch.")
+    # Checkpoint loading logic will be handled by Accelerate if needed in the future
+    print("No existing checkpoint found. Starting training from scratch.")
 
     # Add start_epoch to config for the training function
     config.start_epoch = start_epoch
     
     # Train the model
     train_losses, val_losses = train_diffusion_model(
-        model, train_loader, val_loader, diffusion, optimizer, scheduler, config
+        accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config
     )
 
     # --- 4. Finalize ---
-    if config.save_model_after_training:
+    if config.save_model_after_training and accelerator.is_main_process:
         final_checkpoint_path = os.path.join(config.model_checkpoint_dir, f"ODA_ch{config.channels}_{config.test_id}_epoch_{config.epochs+1}.pth")
         print(f"Saving final model checkpoint to {final_checkpoint_path}...")
 
-        model_state_to_save = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-
+        # Unwrap the model to save the raw state dict
+        unwrapped_model = accelerator.unwrap_model(model)
+        
         torch.save({
             'epoch': config.epochs, 
-            'model_state_dict': model_state_to_save,
+            'model_state_dict': unwrapped_model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'config': vars(config)
         }, final_checkpoint_path)
         print("Final model checkpoint saved.")
 
-    if train_losses and val_losses:
+    if train_losses and val_losses and accelerator.is_main_process:
         plot_filename = f"loss_plot_{config.test_id}_final.png"
         plot_losses(train_losses, val_losses, os.path.join(config.loss_plot_dir, plot_filename))
 
-    if config.use_wandb:
+    if config.use_wandb and accelerator.is_main_process:
         wandb.finish()
 
     print("\nTraining complete.")

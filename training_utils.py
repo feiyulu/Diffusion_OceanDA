@@ -3,7 +3,7 @@
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import autocast
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import numpy as np
@@ -17,127 +17,111 @@ import seaborn
 from plotting_utils import plot_losses
 
 # --- Training Function ---
-def train_diffusion_model(model, train_loader, val_loader, diffusion, optimizer, scheduler, config):
+def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config):
     """
     Trains the 3D diffusion U-Net model with memory optimization techniques.
     """
     model.train()
-    print("Starting training...")
+    if accelerator.is_main_process:
+        print("Starting training...")
     train_losses, val_losses = [], []
-    os.makedirs(config.model_checkpoint_dir, exist_ok=True)
-    os.makedirs(config.loss_plot_dir, exist_ok=True)
-
-    # --- MEMORY SAVING: Initialize GradScaler for mixed precision ---
-    use_amp = getattr(config, 'use_amp', False)
-    scaler = GradScaler(enabled=use_amp)
-    if use_amp:
-        print("Using Automatic Mixed Precision (AMP).")
+    if accelerator.is_main_process:
+        os.makedirs(config.model_checkpoint_dir, exist_ok=True)
+        os.makedirs(config.loss_plot_dir, exist_ok=True)
     
     # Define the threshold for gradient clipping
     gradient_clip_val = 1.0
-    print(f"Gradient clipping enabled with max norm: {gradient_clip_val}")
+    if accelerator.is_main_process:
+        print(f"Gradient clipping enabled with max norm: {gradient_clip_val}")
 
     for epoch in range(config.start_epoch, config.epochs):
         total_train_loss = 0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Training)")
-        optimizer.zero_grad() 
+        # Wrap the data loader with the accelerator for progress bar on main process
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Training)", disable=not accelerator.is_main_process)
+        
+        for batch_idx, (x_0, conditions_batch, location_field_batch, land_mask_batch) in enumerate(pbar):            
+            with accelerator.accumulate(model):
+                t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=accelerator.device).long()                
+                x_t, true_epsilon = diffusion.noise_images(x_0, t, land_mask_batch)
+                conditions_input = {k: v for k, v in conditions_batch.items()}
+                loc_field_input = location_field_batch
 
-        for batch_idx, (x_0, conditions_batch, location_field_batch, land_mask_batch) in enumerate(pbar):
-            x_0 = x_0.to(config.device)
-            current_land_mask = land_mask_batch.to(config.device)
-            
-            t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=config.device).long()
-            
-            # --- MEMORY SAVING: Use autocast for the forward pass ---
-            with autocast(enabled=use_amp):
-                x_t, true_epsilon = diffusion.noise_images(x_0, t, current_land_mask)
-                conditions_input = {k: v.to(config.device) for k, v in conditions_batch.items()}
-                loc_field_input = location_field_batch.to(config.device)
-
-                predicted_epsilon = model(x_t, t, current_land_mask, 
+                predicted_epsilon = model(x_t, t, land_mask_batch, 
                                           conditions=conditions_input, 
                                           location_field=loc_field_input)
 
-                loss = F.mse_loss(predicted_epsilon * current_land_mask, true_epsilon * current_land_mask)
-                loss = loss / config.gradient_accumulation_steps
-            
-            # --- MEMORY SAVING: Scale the loss and backpropagate ---
-            scaler.scale(loss).backward()
+                loss = F.mse_loss(predicted_epsilon * land_mask_batch, true_epsilon * land_mask_batch)
+                
+                # Use accelerator.backward() instead of scaler
+                accelerator.backward(loss)
 
-            if (batch_idx + 1) % config.gradient_accumulation_steps == 0:
-                # Unscale the gradients before clipping
-                scaler.unscale_(optimizer)
-                # Clip the norm of the gradients to prevent them from exploding
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
-                # --- MEMORY SAVING: Unscale gradients and step optimizer ---
-                scaler.step(optimizer)
-                scaler.update()
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), gradient_clip_val)
+                
+                optimizer.step()
+                if scheduler:
+                    scheduler.step()
                 optimizer.zero_grad()
 
-            total_train_loss += loss.item() * config.gradient_accumulation_steps
-            pbar.set_postfix(loss=loss.item() * config.gradient_accumulation_steps)
-
-            # Explicitly delete tensors to prevent memory leaks 
-            del loss, predicted_epsilon, x_t, true_epsilon
-
-        if (len(train_loader.dataset)) % config.gradient_accumulation_steps != 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_val)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+            # Gather loss across all processes for accurate logging
+            avg_loss = accelerator.gather(loss).mean().item()
+            total_train_loss += avg_loss
+            if accelerator.is_main_process:
+                pbar.set_postfix(loss=avg_loss)
 
         avg_train_loss = total_train_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-        print(f"Epoch {epoch+1} finished, Average Training Loss: {avg_train_loss:.4f}")
+        if accelerator.is_main_process:
+            train_losses.append(avg_train_loss)
+            print(f"Epoch {epoch+1} finished, Average Training Loss: {avg_train_loss:.4f}")
 
         # --- Validation Loop ---
         model.eval()
         total_val_loss = 0
         with torch.no_grad():
-            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Validation)")
+            val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Validation)", disable=not accelerator.is_main_process)
             for x_0_val, conditions_batch_val, location_field_batch_val, land_mask_batch_val in val_pbar:
-                x_0_val = x_0_val.to(config.device)
-                current_land_mask_val = land_mask_batch_val.to(config.device)
-                t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=config.device).long()
+                t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=accelerator.device).long()
                 
-                with autocast(enabled=use_amp):
-                    x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, current_land_mask_val)
-                    conditions_input_val = {k: v.to(config.device) for k, v in conditions_batch_val.items()}
-                    loc_field_input_val = location_field_batch_val.to(config.device)
+                x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, land_mask_batch_val)
+                conditions_input_val = {k: v for k, v in conditions_batch_val.items()}
+                loc_field_input_val = location_field_batch_val
 
-                    predicted_epsilon_val = model(x_t_val, t_val, current_land_mask_val, 
-                                                  conditions=conditions_input_val, 
-                                                  location_field=loc_field_input_val)
-                    val_loss = F.mse_loss(predicted_epsilon_val * current_land_mask_val, true_epsilon_val * current_land_mask_val)
+                predicted_epsilon_val = model(x_t_val, t_val, land_mask_batch_val, 
+                                              conditions=conditions_input_val, 
+                                              location_field=loc_field_input_val)
+                val_loss = F.mse_loss(predicted_epsilon_val * land_mask_batch_val, true_epsilon_val * land_mask_batch_val)
                 
-                total_val_loss += val_loss.item()
-                val_pbar.set_postfix(val_loss=val_loss.item())
+                # Gather validation loss
+                total_val_loss += accelerator.gather(val_loss).mean().item()
+                if accelerator.is_main_process:
+                    val_pbar.set_postfix(val_loss=val_loss.item())
 
         avg_val_loss = total_val_loss / len(val_loader)
-        val_losses.append(avg_val_loss)
-        print(f"Epoch {epoch+1} finished, Average Validation Loss: {avg_val_loss:.4f}")
+        if accelerator.is_main_process:
+            val_losses.append(avg_val_loss)
+            print(f"Epoch {epoch+1} finished, Average Validation Loss: {avg_val_loss:.4f}")
 
-        if config.use_wandb:
-            log_dict = {"epoch": epoch + 1, "train_loss": avg_train_loss, "val_loss": avg_val_loss}
-            if scheduler: log_dict["learning_rate"] = scheduler.get_last_lr()[0]
-            wandb.log(log_dict)
+            if config.use_wandb:
+                log_dict = {"epoch": epoch + 1, "train_loss": avg_train_loss, "val_loss": avg_val_loss}
+                if scheduler: log_dict["learning_rate"] = scheduler.get_last_lr()[0]
+                wandb.log(log_dict)
             
-        if scheduler: scheduler.step()
+            if (epoch + 1) % config.save_interval == 0:
+                checkpoint_path = os.path.join(config.model_checkpoint_dir, f"ODA_ch{config.channels}_{config.test_id}_epoch_{epoch+1}.pth")
+                print(f"Saving checkpoint to {checkpoint_path}...")
+                
+                # Unwrap model before saving state dict
+                unwrapped_model = accelerator.unwrap_model(model)
+                torch.save({
+                    'epoch': epoch, 'model_state_dict': unwrapped_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                    'train_losses': train_losses, 'val_losses': val_losses
+                }, checkpoint_path)
+                print("Checkpoint saved.")
+                plot_losses(train_losses, val_losses, os.path.join(config.loss_plot_dir, f"loss_plot_{config.test_id}_epoch_{epoch+1}.png"))
+        
         model.train()
-
-        if (epoch + 1) % config.save_interval == 0:
-            checkpoint_path = os.path.join(config.model_checkpoint_dir, f"ODA_ch{config.channels}_{config.test_id}_epoch_{epoch+1}.pth")
-            print(f"Saving checkpoint to {checkpoint_path}...")
-            torch.save({
-                'epoch': epoch, 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                'scaler_state_dict': scaler.state_dict(), # Save scaler state
-                'train_losses': train_losses, 'val_losses': val_losses
-            }, checkpoint_path)
-            print("Checkpoint saved.")
-            plot_losses(train_losses, val_losses, os.path.join(config.loss_plot_dir, f"loss_plot_{config.test_id}_epoch_{epoch+1}.png"))
 
     return train_losses, val_losses
 

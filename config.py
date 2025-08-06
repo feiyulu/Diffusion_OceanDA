@@ -60,7 +60,6 @@ class Config:
         learning_rate=1e-4,
         use_checkpointing=False,
         use_amp=False,
-        use_data_parallel=False,
 
         use_lr_scheduler=True,
         lr_scheduler_T_max=100,
@@ -180,7 +179,6 @@ class Config:
         self.learning_rate = learning_rate
         self.use_checkpointing = use_checkpointing
         self.use_amp = use_amp
-        self.use_data_parallel = use_data_parallel
 
         self.use_lr_scheduler = use_lr_scheduler
         self.lr_scheduler_T_max = lr_scheduler_T_max if lr_scheduler_T_max is not None else epochs
