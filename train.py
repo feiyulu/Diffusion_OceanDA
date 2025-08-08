@@ -133,14 +133,33 @@ if __name__ == "__main__":
 
     # --- 3. Load Checkpoint and Train ---
     start_epoch, train_losses, val_losses = 0, [], []
-    # Use Accelerate's logic for loading checkpoints
-    accelerate_checkpoint_file = os.path.join(config.model_checkpoint_dir, "pytorch_model.bin")
-    if os.path.exists(accelerate_checkpoint_file):
-        print(f"Resuming training from checkpoint: {config.model_checkpoint_dir}...")
-        accelerator.load_state(config.model_checkpoint_dir)
+    # Find the latest epoch-specific checkpoint directory ---
+    latest_checkpoint_dir = None
+    if os.path.exists(config.model_checkpoint_dir):
+        epoch_dirs = [d for d in os.listdir(config.model_checkpoint_dir) if d.startswith("epoch_")]
+        if epoch_dirs:
+            # Find the directory with the highest epoch number
+            latest_epoch = -1
+            for dir_name in epoch_dirs:
+                try:
+                    epoch_num = int(re.search(r'epoch_(\d+)', dir_name).group(1))
+                    if epoch_num > latest_epoch:
+                        # --- FIX: Check that a valid model file exists before setting the directory ---
+                        checkpoint_path = os.path.join(config.model_checkpoint_dir, dir_name)
+                        if os.path.exists(os.path.join(checkpoint_path, "pytorch_model.bin")) or \
+                           os.path.exists(os.path.join(checkpoint_path, "model.safetensors")):
+                            latest_epoch = epoch_num
+                            latest_checkpoint_dir = checkpoint_path
+                except (AttributeError, ValueError):
+                    # Ignore directories that don't match the pattern
+                    continue
+
+    if latest_checkpoint_dir:
+        print(f"Resuming training from checkpoint: {latest_checkpoint_dir}...")
+        accelerator.load_state(latest_checkpoint_dir)
         
-        # Load custom training state (epoch, losses) from a separate JSON file
-        state_path = os.path.join(config.model_checkpoint_dir, "training_state.json")
+        # Load custom training state (epoch, losses) from the same directory
+        state_path = os.path.join(latest_checkpoint_dir, "training_state.json")
         if os.path.exists(state_path):
             with open(state_path, 'r') as f:
                 training_state = json.load(f)

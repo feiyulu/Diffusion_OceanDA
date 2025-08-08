@@ -113,15 +113,17 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                 wandb.log(log_dict)
             
             if (epoch + 1) % config.save_interval == 0:
-                print(f"Saving checkpoint for epoch {epoch+1} to {config.model_checkpoint_dir}...")
-                accelerator.save_state(config.model_checkpoint_dir)
+                epoch_checkpoint_dir = os.path.join(config.model_checkpoint_dir, f"epoch_{epoch+1}")
+                print(f"Saving checkpoint for epoch {epoch+1} to {epoch_checkpoint_dir}...")
+                accelerator.save_state(epoch_checkpoint_dir)
                 
+                # Save custom training state in the same subdirectory
                 training_state = {
                     'epoch': epoch,
                     'train_losses': train_losses,
                     'val_losses': val_losses
                 }
-                with open(os.path.join(config.model_checkpoint_dir, "training_state.json"), 'w') as f:
+                with open(os.path.join(epoch_checkpoint_dir, "training_state.json"), 'w') as f:
                     json.dump(training_state, f)
 
                 print("Checkpoint saved.")
