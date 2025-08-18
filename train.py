@@ -10,6 +10,8 @@ import torch.nn as nn
 import collections
 import collections.abc
 from accelerate import Accelerator
+import json
+import re
 
 # This resolves the "AttributeError: module 'collections' has no attribute 'Container'"
 if not hasattr(collections, 'Container'):
