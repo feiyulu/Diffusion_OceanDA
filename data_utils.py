@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import xarray as xr
 import pandas as pd
+import datetime
+import cftime
 
 def get_time_coordinates(config):
     """
@@ -127,33 +129,47 @@ def load_static_data(config):
 
     return land_mask_tensor, location_field_tensor
 
-# NEW: Function to load a single slice of the test data for sampling
+# REFINED: Function to load a single slice of the test data for sampling
 def load_test_ocean_slice(config, year, day_of_year):
     """
     Loads a single time slice of test data for a specific year and day of the year.
     """
-    target_time = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(day_of_year, unit='d')
+    # Create a pandas Timestamp for easy calculation
+    target_time_pd = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(day_of_year, unit='d')
+    
     filepath_t = config.filepath_t_test
     filepath_s = config.filepath_s_test if config.use_salinity else None
 
-    def _load_and_process_slice(filepaths, varname, time_coord, min_val, max_val):
+    def _load_and_process_slice(filepaths, varname, target_time, min_val, max_val):
         with xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True, chunks={'time': 1}) as ds:
             if not (config.varname_lat=='lat' and config.varname_lon=='lon'):
                 ds = ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
-            da_sliced = ds[varname].sel(time=time_coord, method='nearest').isel(
+
+            # 1. Get the calendar type from the dataset
+            calendar = ds.time.encoding.get('calendar', 'standard')
+            # 2. Create a cftime object for the target time using the dataset's calendar
+            target_cftime = cftime.datetime(target_time.year, target_time.month, target_time.day, calendar=calendar)
+            # 3. Manually find the index of the nearest time
+            time_diffs = np.abs(ds.time - target_cftime)
+            nearest_time_index = time_diffs.argmin().item()
+            
+            # 4. Select data using the integer index (.isel)
+            da_sliced = ds[varname].isel(
+                time=nearest_time_index,
                 z=slice(config.depth_range[0], config.depth_range[1]),
                 lat=slice(config.lat_range[0], config.lat_range[1]),
                 lon=slice(config.lon_range[0], config.lon_range[1])
             ).load()
+            
         data_np = da_sliced.values.astype(np.float32)
         data_np[np.isnan(data_np)] = 0.0
         normalized_data_np = (data_np - min_val) / (max_val - min_val) if (max_val - min_val) > 1e-6 else np.full_like(data_np, 0.5)
         return normalized_data_np
 
-    temp_np = _load_and_process_slice(filepath_t, config.varname_t, target_time, config.T_range[0], config.T_range[1])
+    temp_np = _load_and_process_slice(filepath_t, config.varname_t, target_time_pd, config.T_range[0], config.T_range[1])
     data_vars = [temp_np]
     if config.use_salinity:
-        sal_np = _load_and_process_slice(filepath_s, config.varname_s, target_time, config.S_range[0], config.S_range[1])
+        sal_np = _load_and_process_slice(filepath_s, config.varname_s, target_time_pd, config.S_range[0], config.S_range[1])
         data_vars.append(sal_np)
     
     data_tensor = torch.tensor(np.stack(data_vars, axis=0), dtype=torch.float32).unsqueeze(0)
@@ -161,10 +177,12 @@ def load_test_ocean_slice(config, year, day_of_year):
     conditional_data = {}
     if config.conditioning_configs:
         if 'dayofyear' in config.conditioning_configs:
-            conditional_data['dayofyear'] = torch.tensor(target_time.dayofyear, dtype=torch.long)
+            # Use the pandas object to get the day of the year
+            conditional_data['dayofyear'] = torch.tensor(target_time_pd.dayofyear, dtype=torch.long)
         if 'co2' in config.conditioning_configs and config.co2_filepath:
             with xr.open_dataset(config.co2_filepath) as co2_ds:
-                co2_da = co2_ds[config.co2_varname].sel(time=target_time, method='nearest').load()
+                # The pandas object is suitable for the CO2 data which likely uses a standard calendar
+                co2_da = co2_ds[config.co2_varname].sel(time=target_time_pd, method='nearest').load()
                 co2_normalized = (co2_da.values - config.co2_range[0]) / (config.co2_range[1] - config.co2_range[0])
                 conditional_data['co2'] = torch.tensor(co2_normalized, dtype=torch.float32)
 

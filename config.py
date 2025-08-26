@@ -92,6 +92,7 @@ class Config:
         # --- Sampling Parameters ---
         sampling_method='ddpm',
         ensemble_size=1,
+        sampling_batch_size=4,
         sampling_steps=20, # Only for accelerated samplers like DPM-Solver
         ddim_eta=0.0,
         observation_fidelity_weight=1.0,
@@ -215,6 +216,7 @@ class Config:
         # --- Store Sampling Settings ---
         self.sampling_method = sampling_method
         self.ensemble_size = ensemble_size
+        self.sampling_batch_size = sampling_batch_size
         self.sampling_steps = sampling_steps
         self.ddim_eta = ddim_eta
         self.observation_fidelity_weight = observation_fidelity_weight
