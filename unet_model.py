@@ -166,9 +166,14 @@ class ResidualBlock(nn.Module):
             h = h * (1 + scale) + shift
         h, h_mask = self.conv2(h, h_mask); h = self.norm2(h); h = self.act2(h); h = self.dropout(h)
         residual, residual_mask = self.residual_conv(x, mask) if isinstance(self.residual_conv, PartialConv3d) else (self.residual_conv(x), mask)
-        if h.shape != residual.shape:
-             residual = F.interpolate(residual, size=h.shape[-3:], mode='trilinear', align_corners=False)
-             residual_mask = F.interpolate(residual_mask, size=h_mask.shape[-3:], mode='nearest')
+        
+        # The convolutions in this block are configured with padding to preserve the spatial dimensions,
+        # so the shapes of 'h' and 'residual' should always match. This check was redundant and
+        # could mask other architectural bugs.
+        # if h.shape != residual.shape:
+        #      residual = F.interpolate(residual, size=h.shape[-3:], mode='trilinear', align_corners=False)
+        #      residual_mask = F.interpolate(residual_mask, size=h_mask.shape[-3:], mode='nearest')
+        
         combined_mask = h_mask * residual_mask
         return (h + residual) * combined_mask, combined_mask
 

@@ -53,9 +53,18 @@ def map_real_obs_to_grid_3d(config, sample_day_datetime, true_sample_shape):
         return torch.zeros(true_sample_shape), torch.zeros(true_sample_shape, dtype=torch.bool), []
     
     # 3. Load the model's static grid to get geolat/geolon
-    static_ds = xr.open_dataset(config.filepath_static)
-    model_lats = static_ds['geolat'].isel(yh=slice(config.lat_range[0], config.lat_range[1]), xh=slice(config.lon_range[0], config.lon_range[1])).values
-    model_lons = static_ds['geolon'].isel(yh=slice(config.lat_range[0], config.lat_range[1]), xh=slice(config.lon_range[0], config.lon_range[1])).values
+    with xr.open_dataset(config.filepath_static) as static_ds:
+        if not (config.varname_lat == 'lat' and config.varname_lon == 'lon'):
+            static_ds = static_ds.rename({config.varname_lat: 'lat', config.varname_lon: 'lon'})
+
+        model_lats = static_ds['geolat'].isel(
+            lat=slice(config.lat_range[0], config.lat_range[1]), 
+            lon=slice(config.lon_range[0], config.lon_range[1])
+        ).values
+        model_lons = static_ds['geolon'].isel(
+            lat=slice(config.lat_range[0], config.lat_range[1]), 
+            lon=slice(config.lon_range[0], config.lon_range[1])
+        ).values
     
     # 4. Create a KD-Tree for efficient nearest-neighbor search on the 2D horizontal grid
     grid_points_2d = np.vstack([model_lats.ravel(), model_lons.ravel()]).T
