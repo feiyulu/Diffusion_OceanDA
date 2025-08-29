@@ -10,11 +10,9 @@ import cftime
 def get_time_coordinates(config):
     """
     Scans the NetCDF files to get a list of all available time coordinates.
-    This is used to determine the length of the dataset without loading everything into RAM.
     """
     filepath_t = config.filepath_t
     print(f"Scanning time coordinates from: {filepath_t}")
-    # Use chunks={} to prevent loading data variables into memory during scan
     with xr.open_mfdataset(filepath_t, combine='by_coords', decode_cf=True, chunks={}) as ds:
         time_coords = ds.sel(time=slice(config.training_day_range[0], config.training_day_range[1])).time
         return time_coords[::config.training_day_interval].values
@@ -22,11 +20,9 @@ def get_time_coordinates(config):
 def load_single_ocean_slice(config, time_coord):
     """
     Loads and processes a single time slice of ocean data.
-    This is called by the Dataset's __getitem__ method for lazy loading.
     """
     filepath_t = config.filepath_t
     filepath_s = config.filepath_s if config.use_salinity else None
-    
     data_vars = []
     
     def _load_and_process_slice(filepaths, varname, time_coord, min_val, max_val):
@@ -34,7 +30,6 @@ def load_single_ocean_slice(config, time_coord):
             if not (config.varname_lat=='lat' and config.varname_lon=='lon'):
                 ds = ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
             
-            # Select the single time slice and load it into memory
             da_sliced = ds[varname].sel(time=time_coord, method='nearest').isel(
                 z=slice(config.depth_range[0], config.depth_range[1]),
                 lat=slice(config.lat_range[0], config.lat_range[1]), 
@@ -43,7 +38,6 @@ def load_single_ocean_slice(config, time_coord):
         
         data_np = da_sliced.values.astype(np.float32)
         data_np[np.isnan(data_np)] = 0.0
-        
         normalized_data_np = (data_np - min_val) / (max_val - min_val) if (max_val - min_val) > 1e-6 else np.full_like(data_np, 0.5)
         return normalized_data_np
 
@@ -59,14 +53,11 @@ def load_single_ocean_slice(config, time_coord):
     conditional_data = {}
     if config.conditioning_configs:
         if 'dayofyear' in config.conditioning_configs:
-            # Use .timetuple().tm_yday to correctly get the day of the year from a cftime object
             day_of_year = time_coord.timetuple().tm_yday
             conditional_data['dayofyear'] = torch.tensor(day_of_year, dtype=torch.long)
         
         if 'co2' in config.conditioning_configs and config.co2_filepath:
             with xr.open_dataset(config.co2_filepath) as co2_ds:
-                # Convert the cftime object to a standard pandas Timestamp
-                # before using it for selection to avoid calendar mismatch errors.
                 pandas_time = pd.to_datetime(str(time_coord))
                 co2_da = co2_ds[config.co2_varname].sel(time=pandas_time, method='nearest').load()
                 co2_normalized = (co2_da.values - config.co2_range[0]) / (config.co2_range[1] - config.co2_range[0])
@@ -76,10 +67,9 @@ def load_single_ocean_slice(config, time_coord):
 
 def load_static_data(config):
     """
-    Loads the static (non-time-varying) data like the land mask and location embeddings.
-    This data is small enough to be kept in memory for the entire training run.
+    Loads static data: land mask, location embeddings, and area weights.
     """
-    print("Loading static data (mask and location embeddings)...")
+    print("Loading static data (mask, location embeddings, area weights)...")
     with xr.open_dataset(config.filepath_static) as static_ds:
         if not (config.varname_lat=='lat' and config.varname_lon=='lon'):
             static_ds = static_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
@@ -97,6 +87,22 @@ def load_static_data(config):
 
         land_mask_tensor = torch.tensor(static_mask_np[np.newaxis, np.newaxis, :, :, :], dtype=torch.float32)
         
+        # --- Load Area Weights for Loss Calculation ---
+        area_weights_tensor = None
+        if config.area_weight_varname:
+            print(f"Loading area weights from variable: {config.area_weight_varname}")
+            area_da = static_ds[config.area_weight_varname].isel(
+                lat=slice(config.lat_range[0], config.lat_range[1]), 
+                lon=slice(config.lon_range[0], config.lon_range[1])
+            )
+            area_np = area_da.values.astype(np.float32)
+            # Normalize the weights
+            total_ocean_area = np.sum(area_np[static_mask_np[0] == 1])
+            if total_ocean_area > 0:
+                area_np /= total_ocean_area
+            area_weights_tensor = torch.tensor(area_np, dtype=torch.float32).unsqueeze(0)
+            print(f"Area weights loaded with shape: {area_weights_tensor.shape}")
+
         location_field_tensor = None
         if config.location_embedding_channels > 0:
             print(f"Generating location embeddings for: {config.location_embedding_types}")
@@ -127,16 +133,13 @@ def load_static_data(config):
                 location_field_tensor = torch.tensor(location_field_single_sample, dtype=torch.float32).unsqueeze(0)
                 print(f"Location embedding created with shape: {location_field_tensor.shape}")
 
-    return land_mask_tensor, location_field_tensor
+    return land_mask_tensor, location_field_tensor, area_weights_tensor
 
-# REFINED: Function to load a single slice of the test data for sampling
 def load_test_ocean_slice(config, year, day_of_year):
     """
-    Loads a single time slice of test data for a specific year and day of the year.
+    Loads a single time slice of test data.
     """
-    # Create a pandas Timestamp for easy calculation
     target_time_pd = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(day_of_year, unit='d')
-    
     filepath_t = config.filepath_t_test
     filepath_s = config.filepath_s_test if config.use_salinity else None
 
@@ -144,16 +147,11 @@ def load_test_ocean_slice(config, year, day_of_year):
         with xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True, chunks={'time': 1}) as ds:
             if not (config.varname_lat=='lat' and config.varname_lon=='lon'):
                 ds = ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
-
-            # 1. Get the calendar type from the dataset
             calendar = ds.time.encoding.get('calendar', 'standard')
-            # 2. Create a cftime object for the target time using the dataset's calendar
             target_cftime = cftime.datetime(target_time.year, target_time.month, target_time.day, calendar=calendar)
-            # 3. Manually find the index of the nearest time
             time_diffs = np.abs(ds.time - target_cftime)
             nearest_time_index = time_diffs.argmin().item()
             
-            # 4. Select data using the integer index (.isel)
             da_sliced = ds[varname].isel(
                 time=nearest_time_index,
                 z=slice(config.depth_range[0], config.depth_range[1]),
@@ -177,11 +175,9 @@ def load_test_ocean_slice(config, year, day_of_year):
     conditional_data = {}
     if config.conditioning_configs:
         if 'dayofyear' in config.conditioning_configs:
-            # Use the pandas object to get the day of the year
             conditional_data['dayofyear'] = torch.tensor(target_time_pd.dayofyear, dtype=torch.long)
         if 'co2' in config.conditioning_configs and config.co2_filepath:
             with xr.open_dataset(config.co2_filepath) as co2_ds:
-                # The pandas object is suitable for the CO2 data which likely uses a standard calendar
                 co2_da = co2_ds[config.co2_varname].sel(time=target_time_pd, method='nearest').load()
                 co2_normalized = (co2_da.values - config.co2_range[0]) / (config.co2_range[1] - config.co2_range[0])
                 conditional_data['co2'] = torch.tensor(co2_normalized, dtype=torch.float32)

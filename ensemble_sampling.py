@@ -1,6 +1,5 @@
 # --- ensemble_sampling.py ---
 # This script generates an ensemble of samples from a trained 3D model.
-# REFINED: Added batched sampling loop to conserve GPU memory while improving speed.
 import torch
 import numpy as np
 import xarray as xr
@@ -11,7 +10,6 @@ from tqdm import tqdm
 import re
 import pickle
 
-# Import components from other project files
 from config import Config
 from data_utils import load_static_data, load_test_ocean_slice
 from unet_model import UNet
@@ -26,14 +24,12 @@ if __name__ == "__main__":
     parser.add_argument("--config", "-c", type=str, default="config.json", help="Path to the JSON config file.")
     args = parser.parse_args()
 
-    # --- 1. Initialization ---
     config_path = os.path.join(args.work_path, args.config)
     try:
         config = Config.from_json_file(config_path)
     except FileNotFoundError as e:
         print(e); raise
 
-    # Set device
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     config.device = device
     print(f"Using device: {config.device}")
@@ -46,16 +42,11 @@ if __name__ == "__main__":
         beta_end=config.beta_end, device=config.device
     )
 
-    # --- 2. Load Pre-trained Model (ROBUST LOGIC) ---
     state_dict = None
     checkpoint_dir = config.model_checkpoint_dir
-    
     if os.path.exists(checkpoint_dir):
-        # Find all potential checkpoints and sort them by modification time (newest first)
         all_checkpoints = [os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir)]
         all_checkpoints.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-
-        # Iterate through checkpoints and try to load them until one succeeds
         for checkpoint_path in all_checkpoints:
             try:
                 if checkpoint_path.endswith('.pth'):
@@ -63,20 +54,19 @@ if __name__ == "__main__":
                     checkpoint_data = torch.load(checkpoint_path, map_location=config.device, weights_only=False)
                     state_dict = checkpoint_data['model_state_dict']
                     print("Successfully loaded model state from .pth file.")
-                    break # Exit loop on success
+                    break
                 elif os.path.isdir(checkpoint_path) and os.path.basename(checkpoint_path).startswith('epoch_'):
                     print(f"Attempting to load Accelerate checkpoint: {os.path.basename(checkpoint_path)}")
                     model_file = os.path.join(checkpoint_path, "pytorch_model.bin")
                     if not os.path.exists(model_file):
                          model_file = os.path.join(checkpoint_path, "model.safetensors")
-                    
                     if os.path.exists(model_file):
                         state_dict = torch.load(model_file, map_location=config.device, weights_only=False)
                         print("Successfully loaded model state from Accelerate checkpoint.")
-                        break # Exit loop on success
+                        break
             except (pickle.UnpicklingError, RuntimeError, EOFError) as e:
                 print(f"Warning: Could not load checkpoint {os.path.basename(checkpoint_path)}. It may be corrupted. Trying next...")
-                continue # Go to the next checkpoint
+                continue
     
     if state_dict is None:
         raise FileNotFoundError(f"No valid, uncorrupted model checkpoint found in {checkpoint_dir}.")
@@ -84,24 +74,20 @@ if __name__ == "__main__":
     model.load_state_dict(state_dict)
     print("Model loaded successfully.")
 
-
     z_ds=xr.open_dataset(config.filepath_z_static)
     z_da=z_ds['z']
 
-    # --- 3. Prepare Static Data ---
     print("Loading static data for sampling...")
-    land_mask, location_field = load_static_data(config)
+    land_mask, location_field, area_weights = load_static_data(config)
     land_mask = land_mask.to(config.device)
     if location_field is not None:
         location_field = location_field.to(config.device)
 
-    # --- 4. Loop Through Sample Days and Generate Ensembles ---
     for year in config.sample_years[:-1]:
         for sample_day in config.sample_days:
             sample_day_str = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(sample_day, unit='d')
             print(f"\n--- Processing Sample Day: {sample_day_str.strftime('%Y-%m-%d')} ---")
 
-            # --- 4a. Prepare Data and Observations ---
             true_sample, true_conditions = load_test_ocean_slice(config, year, sample_day)
             true_sample = true_sample.to(config.device)
             target_location_field = location_field
@@ -149,7 +135,6 @@ if __name__ == "__main__":
                 num_obs_points = len(obs_points_actual)
                 print(f"Generated {num_obs_points} observation points from {num_profiles_to_sample} vertical profiles.")
 
-            # --- 4b. Generate Ensemble in Batches ---
             print(f"Generating ensemble of size {config.ensemble_size} with {num_obs_points} observations...")
             ensemble_members = []
             batch_size = config.sampling_batch_size
@@ -159,7 +144,6 @@ if __name__ == "__main__":
                 while num_generated < config.ensemble_size:
                     current_batch_size = min(batch_size, config.ensemble_size - num_generated)
                     
-                    # Generate one batch of samples at a time
                     generated_batch = sample_conditional(
                         model, diffusion, config,
                         observations=observations.to(device), 
@@ -170,26 +154,24 @@ if __name__ == "__main__":
                         num_samples=current_batch_size
                     )
                     
-                    # Move samples to CPU and add to the list
                     for i in range(generated_batch.shape[0]):
                         ensemble_members.append(generated_batch[i].cpu())
                     
                     num_generated += current_batch_size
                     pbar.update(current_batch_size)
 
-
-            # --- 4c. Analyze and Visualize Ensemble ---
             if ensemble_members:
-                # Stack the collected CPU tensors for analysis
                 ensemble_tensor = torch.stack(ensemble_members)
                 ensemble_mean = torch.mean(ensemble_tensor, dim=0)
                 ensemble_spread = torch.std(ensemble_tensor, dim=0)
 
-                # Loop through specified depth levels and plot each one
+                area_weights_np = area_weights.squeeze(0).cpu().numpy()
+
                 for depth_idx in config.plot_depth_levels:
                     plot_ensemble_results_3d(
                         ensemble_mean, ensemble_spread, true_sample.squeeze(0).cpu(), clim_pred, 
                         obs_points_actual, land_mask[0, 0, depth_idx].cpu().numpy(),
+                        area_weights_np,
                         config, sample_day_str, num_obs_points,
                         depth_level=depth_idx, depth=z_da[depth_idx].values
                     )

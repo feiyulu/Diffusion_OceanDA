@@ -13,7 +13,6 @@ from accelerate import Accelerator
 import json
 import re
 
-# This resolves the "AttributeError: module 'collections' has no attribute 'Container'"
 if not hasattr(collections, 'Container'):
     collections.Container = collections.abc.Container
 
@@ -28,30 +27,26 @@ from plotting_utils import plot_losses
 class LazyOceanDataset(torch.utils.data.Dataset):
     """
     A PyTorch Dataset that loads data from disk on-the-fly ("lazily").
-    This is essential for datasets that are too large to fit into RAM.
     """
-    def __init__(self, config, time_coords, land_mask, location_field): 
+    def __init__(self, config, time_coords, land_mask, location_field, area_weights): 
         self.config = config
         self.time_coords = time_coords
         self.land_mask = land_mask
         self.location_field = location_field
+        self.area_weights = area_weights
 
     def __len__(self):
         return len(self.time_coords)
 
     def __getitem__(self, idx):
         time_coord = self.time_coords[idx]
-        
-        # Load a single data slice and its conditions from disk
         data_slice, conditions_at_idx = load_single_ocean_slice(self.config, time_coord)
-        
-        # Apply the static land mask 
-        # to ensure the output is 4D (C, D, H, W), not 5D.
         data_slice_masked = data_slice * self.land_mask.squeeze(0)
         
-        # Return the single sample. DataLoader will batch these together.
-        # Squeeze(0) removes the singleton batch dim from the static tensors.
-        return data_slice_masked, conditions_at_idx, self.location_field.squeeze(0), self.land_mask.squeeze(0)
+        # NEW: Return area weights along with other data
+        return (data_slice_masked, conditions_at_idx, 
+                self.location_field.squeeze(0), self.land_mask.squeeze(0), 
+                self.area_weights.squeeze(0))
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
@@ -64,8 +59,7 @@ if __name__ == "__main__":
     try:
         config = Config.from_json_file(config_path)
     except FileNotFoundError as e:
-        print(e)
-        raise Exception(f"Please ensure '{config_path}' exists.")
+        print(e); raise
 
     accelerator = Accelerator(gradient_accumulation_steps=config.gradient_accumulation_steps)
 
@@ -78,39 +72,30 @@ if __name__ == "__main__":
     device = accelerator.device
     print(f"Using device: {device}")
     
-    # --- 1. Prepare Data (NEW Lazy-Loading Method) ---
     if accelerator.is_main_process:
         print("Preparing data using lazy-loading...")
     
-    # Load static data (mask, location embeddings) once and keep in memory
-    land_mask, location_field_data = load_static_data(config)
+    land_mask, location_field_data, area_weights = load_static_data(config)
     if accelerator.is_main_process:
         print(f"Static land mask tensor shape: {land_mask.shape}")
     
-    # Get the list of all time steps to determine dataset length without loading data
     time_coords = get_time_coordinates(config)
     if accelerator.is_main_process:
         print(f"Found {len(time_coords)} total time steps for training.")
 
-    # Create the lazy-loading dataset instance
-    full_dataset = LazyOceanDataset(config, time_coords, land_mask, location_field_data)
+    full_dataset = LazyOceanDataset(config, time_coords, land_mask, location_field_data, area_weights)
     
-    # Split into training and validation sets
     val_size = int(config.validation_split * len(full_dataset))
     train_size = len(full_dataset) - val_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
-    # Create DataLoaders. num_workers > 0 is crucial for performance with lazy loading.
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     
     if config.generate_training_animation and accelerator.is_main_process:
         print("Warning: Training animation generation is disabled for lazy-loading mode.")
 
-    # --- 2. Initialize Model and Diffusion Process ---
-    # UNet is now initialized directly with the config object
     model = UNet(config, verbose_init=accelerator.is_main_process)
-
     print(f"Total trainable parameters in UNet model: {count_parameters(model):,}")
 
     if config.use_wandb and accelerator.is_main_process:
@@ -123,44 +108,36 @@ if __name__ == "__main__":
             optimizer, T_max=config.lr_scheduler_T_max, eta_min=config.lr_scheduler_eta_min
         )
 
-    # Prepare all components with the accelerator
     model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, val_loader, scheduler
     )
 
-    # Diffusion process no longer needs data_shape at initialization
     diffusion = Diffusion(
         timesteps=config.timesteps, beta_start=config.beta_start, beta_end=config.beta_end, device=device
     )
 
-    # --- 3. Load Checkpoint and Train ---
     start_epoch, train_losses, val_losses = 0, [], []
-    # Find the latest epoch-specific checkpoint directory ---
     latest_checkpoint_dir = None
     if os.path.exists(config.model_checkpoint_dir):
         epoch_dirs = [d for d in os.listdir(config.model_checkpoint_dir) if d.startswith("epoch_")]
         if epoch_dirs:
-            # Find the directory with the highest epoch number
             latest_epoch = -1
             for dir_name in epoch_dirs:
                 try:
                     epoch_num = int(re.search(r'epoch_(\d+)', dir_name).group(1))
                     if epoch_num > latest_epoch:
-                        # --- FIX: Check that a valid model file exists before setting the directory ---
                         checkpoint_path = os.path.join(config.model_checkpoint_dir, dir_name)
                         if os.path.exists(os.path.join(checkpoint_path, "pytorch_model.bin")) or \
                            os.path.exists(os.path.join(checkpoint_path, "model.safetensors")):
                             latest_epoch = epoch_num
                             latest_checkpoint_dir = checkpoint_path
                 except (AttributeError, ValueError):
-                    # Ignore directories that don't match the pattern
                     continue
 
     if latest_checkpoint_dir:
         print(f"Resuming training from checkpoint: {latest_checkpoint_dir}...")
         accelerator.load_state(latest_checkpoint_dir)
         
-        # Load custom training state (epoch, losses) from the same directory
         state_path = os.path.join(latest_checkpoint_dir, "training_state.json")
         if os.path.exists(state_path):
             with open(state_path, 'r') as f:
@@ -172,22 +149,16 @@ if __name__ == "__main__":
     else:
         print("No existing checkpoint found. Starting training from scratch.")
 
-    # Add start_epoch to config for the training function
     config.start_epoch = start_epoch
     
-    # Train the model
     train_losses, val_losses = train_diffusion_model(
         accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config
     )
 
-    # --- 4. Finalize ---
     if config.save_model_after_training and accelerator.is_main_process:
         final_checkpoint_path = os.path.join(config.model_checkpoint_dir, f"ODA_ch{config.channels}_{config.test_id}_epoch_{config.epochs+1}.pth")
         print(f"Saving final model checkpoint to {final_checkpoint_path}...")
-
-        # Unwrap the model to save the raw state dict
         unwrapped_model = accelerator.unwrap_model(model)
-        
         torch.save({
             'epoch': config.epochs, 
             'model_state_dict': unwrapped_model.state_dict(),

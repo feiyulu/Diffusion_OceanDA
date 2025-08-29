@@ -1,6 +1,5 @@
 # --- training_utils.py ---
 # This file contains the main training loop for the model.
-# UPDATED: Re-implemented checkpointing using Accelerate's save_state.
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -18,6 +17,23 @@ import seaborn
 from plotting_utils import plot_losses
 import json
 
+# --- Weighted Loss Function ---
+def weighted_mse_loss(pred, target, weight, mask):
+    """Calculates MSE loss weighted by grid-cell area."""
+    squared_error = F.mse_loss(pred, target, reduction='none')
+    # Ensure weights are broadcastable to the 5D tensor shape
+    # weight shape: (B, H, W) -> (B, 1, 1, H, W)
+    weights_5d = weight.unsqueeze(1).unsqueeze(1).expand_as(squared_error)
+    
+    # Apply both area weights and the land mask
+    weighted_squared_error = squared_error * weights_5d * mask
+    
+    # Normalize by the sum of weights over the valid (ocean) area
+    # Add a small epsilon to prevent division by zero if a batch is all land
+    sum_of_weights = (weights_5d * mask).sum() + 1e-9
+    
+    return weighted_squared_error.sum() / sum_of_weights
+
 # --- Training Function ---
 def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config, initial_train_losses=None, initial_val_losses=None):
     """
@@ -27,7 +43,6 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
     if accelerator.is_main_process:
         print("Starting training...")
     
-    # Initialize loss lists from checkpoint if provided
     train_losses = initial_train_losses if initial_train_losses is not None else []
     val_losses = initial_val_losses if initial_val_losses is not None else []
     
@@ -35,17 +50,15 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
         os.makedirs(config.model_checkpoint_dir, exist_ok=True)
         os.makedirs(config.loss_plot_dir, exist_ok=True)
 
-    # Define the threshold for gradient clipping
     gradient_clip_val = 1.0
     if accelerator.is_main_process:
         print(f"Gradient clipping enabled with max norm: {gradient_clip_val}")
 
     for epoch in range(config.start_epoch, config.epochs):
         total_train_loss = 0
-        # Wrap the data loader with the accelerator for progress bar on main process
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Training)", disable=not accelerator.is_main_process)
         
-        for batch_idx, (x_0, conditions_batch, location_field_batch, land_mask_batch) in enumerate(pbar):
+        for batch_idx, (x_0, conditions_batch, location_field_batch, land_mask_batch, area_weights_batch) in enumerate(pbar):
             with accelerator.accumulate(model):
                 t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=accelerator.device).long()
                 x_t, true_epsilon = diffusion.noise_images(x_0, t, land_mask_batch)
@@ -56,9 +69,8 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                                           conditions=conditions_input, 
                                           location_field=loc_field_input)
 
-                loss = F.mse_loss(predicted_epsilon * land_mask_batch, true_epsilon * land_mask_batch)
+                loss = weighted_mse_loss(predicted_epsilon, true_epsilon, area_weights_batch, land_mask_batch)
                 
-                # Use accelerator.backward() instead of scaler
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
@@ -69,7 +81,6 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                     scheduler.step()
                 optimizer.zero_grad()
 
-            # Gather loss across all processes for accurate logging
             avg_loss = accelerator.gather(loss).mean().item()
             total_train_loss += avg_loss
             if accelerator.is_main_process:
@@ -85,7 +96,7 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
         total_val_loss = 0
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Validation)", disable=not accelerator.is_main_process)
-            for x_0_val, conditions_batch_val, location_field_batch_val, land_mask_batch_val in val_pbar:
+            for x_0_val, conditions_batch_val, location_field_batch_val, land_mask_batch_val, area_weights_batch_val in val_pbar:
                 t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=accelerator.device).long()
                 
                 x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, land_mask_batch_val)
@@ -95,9 +106,9 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                 predicted_epsilon_val = model(x_t_val, t_val, land_mask_batch_val, 
                                               conditions=conditions_input_val, 
                                               location_field=loc_field_input_val)
-                val_loss = F.mse_loss(predicted_epsilon_val * land_mask_batch_val, true_epsilon_val * land_mask_batch_val)
                 
-                # Gather validation loss
+                val_loss = weighted_mse_loss(predicted_epsilon_val, true_epsilon_val, area_weights_batch_val, land_mask_batch_val)
+                
                 total_val_loss += accelerator.gather(val_loss).mean().item()
                 if accelerator.is_main_process:
                     val_pbar.set_postfix(val_loss=val_loss.item())
@@ -117,12 +128,7 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                 print(f"Saving checkpoint for epoch {epoch+1} to {epoch_checkpoint_dir}...")
                 accelerator.save_state(epoch_checkpoint_dir)
                 
-                # Save custom training state in the same subdirectory
-                training_state = {
-                    'epoch': epoch,
-                    'train_losses': train_losses,
-                    'val_losses': val_losses
-                }
+                training_state = {'epoch': epoch, 'train_losses': train_losses, 'val_losses': val_losses}
                 with open(os.path.join(epoch_checkpoint_dir, "training_state.json"), 'w') as f:
                     json.dump(training_state, f)
 
@@ -138,23 +144,17 @@ def create_training_animation(data_tensor, land_mask, config):
     """
     Creates GIF animations of the training data for specified depth levels.
     """
-    # Loop through each depth level specified in the config
     for depth_level in config.plot_depth_levels:
-        # Construct a unique filename for each depth level's animation
         save_path = os.path.join(config.output_dir, f"training_animation_depth_{depth_level}.gif")
         print(f"Creating training data animation for depth level {depth_level}...")
         
         frames = []
-        # Select the 2D land mask for the current depth level
         land_mask_np = land_mask[0, 0, depth_level].cpu().numpy() 
-
         num_rows = config.channels
-        
         max_frames = 100
         data_to_animate = data_tensor[:min(len(data_tensor), max_frames*5):5]
 
         static_ds = xr.open_dataset(config.filepath_static)
-        
         z_ds=xr.open_dataset(config.filepath_z_static)
         z_da=z_ds['z']
         vmin=0.
@@ -166,12 +166,8 @@ def create_training_animation(data_tensor, land_mask, config):
         lon_grid = static_ds['geolon'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
 
         for i, sample in enumerate(tqdm(data_to_animate, desc=f"Generating frames for depth {depth_level}")):
-            # Select the data for the current depth level
             sample_np_level = sample[:, depth_level, :, :].cpu().numpy()
-
-            fig, axes = plt.subplots(
-                num_rows, 1, figsize=(8, 4 * num_rows), squeeze=False,
-                subplot_kw={'projection':ccrs.PlateCarree()})
+            fig, axes = plt.subplots(num_rows, 1, figsize=(8, 4 * num_rows), squeeze=False, subplot_kw={'projection':ccrs.PlateCarree()})
 
             for c in range(num_rows):
                 var_name = "Temperature" if c == 0 else "Salinity"
@@ -179,18 +175,13 @@ def create_training_animation(data_tensor, land_mask, config):
                 
                 ax = axes[c, 0]
                 masked_data = np.ma.masked_where(land_mask_np == 0, sample_np_level[c])
-                im = ax.pcolormesh(
-                    lon_grid,lat_grid,masked_data,
-                    cmap=cmap,vmin=vmin,vmax=vmax,transform=ccrs.PlateCarree())
-                ax.gridlines(
-                    crs=ccrs.PlateCarree(), draw_labels=True,linewidth=2, 
-                    color='gray', alpha=0.5, linestyle='--')
+                im = ax.pcolormesh(lon_grid,lat_grid,masked_data, cmap=cmap,vmin=vmin,vmax=vmax,transform=ccrs.PlateCarree())
+                ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True,linewidth=2, color='gray', alpha=0.5, linestyle='--')
                 ax.coastlines()
                 ax.set_title(f'Sample {i+1} - Depth Idx {depth_level} - {var_name}')
                 plt.colorbar(im, ax=ax, label=f'Normalized {var_name}', orientation='horizontal', pad=0.1)
 
             plt.tight_layout()
-            
             fig.canvas.draw()
             rgba_buf = fig.canvas.buffer_rgba()
             image_with_alpha = np.asarray(rgba_buf).reshape(fig.canvas.get_width_height()[::-1] + (4,))

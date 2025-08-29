@@ -1,6 +1,5 @@
 # --- plotting_utils.py ---
-# This file contains utility functions for creating visualizations,
-# such as loss plots and comparisons of model outputs.
+# This file contains utility functions for creating visualizations.
 
 import os
 import numpy as np
@@ -18,7 +17,7 @@ def plot_losses(train_losses, val_losses, save_path):
     plt.plot(epochs_range, val_losses, 'o-', label='Validation Loss')
     plt.title('Training and Validation Loss')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss (MSE)')
+    plt.ylabel('Loss (Weighted MSE)')
     plt.legend()
     plt.grid(True)
     plt.savefig(save_path)
@@ -28,14 +27,14 @@ def plot_losses(train_losses, val_losses, save_path):
 
 def plot_ensemble_results_3d(
     ensemble_mean, ensemble_spread, true_sample, clim_pred,
-    obs_points_actual, land_mask_np, config, sample_day_datetime,
+    obs_points_actual, land_mask_np, area_weights_np, config, sample_day_datetime,
     num_obs_points, depth_level, depth, select_size=None):
     """
-    Visualizes a specific depth level of the 3D ensemble sampling results.
+    Visualizes a specific depth level of the 3D ensemble sampling results,
+    using area-weighted RMSE for more accurate error metrics.
     """
     print(f"\nVisualizing and saving results for depth level {depth_level}...")
 
-    # --- Prepare data for plotting by selecting the specified depth level ---
     ensemble_mean_level = ensemble_mean[:, depth_level, :, :].cpu().numpy()
     ensemble_spread_level = ensemble_spread[:, depth_level, :, :].cpu().numpy()
     true_sample_level = true_sample[:, depth_level, :, :].cpu().numpy()
@@ -47,14 +46,14 @@ def plot_ensemble_results_3d(
         fig, axes = plt.subplots(3, 2, figsize=(16, 12), squeeze=False)
 
         vmin=0.
-        vmax=np.exp(-depth/3000)
-        verror=0.2*np.exp(-depth/3000)
+        vmax=np.exp(-depth/2000)
+        verror=0.2*np.exp(-depth/2000)
+        vstd=0.1*np.exp(-depth/2000)
 
         var_name = "Temperature" if c == 0 else "Salinity"
         cmap = 'viridis' if c == 0 else 'plasma'
         error_cmap = 'bwr'
 
-        # Mask out land areas for all plots in this channel
         masked_true = np.ma.masked_where(land_mask_np == 0, true_sample_level[c])
         masked_mean = np.ma.masked_where(land_mask_np == 0, ensemble_mean_level[c])
         masked_spread = np.ma.masked_where(land_mask_np == 0, ensemble_spread_level[c])
@@ -64,7 +63,6 @@ def plot_ensemble_results_3d(
         # --- Row 1: Ground Truth ---
         ax = axes[0, 0]
         im = ax.imshow(masked_true, cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
-        # Plot observation points for this channel and depth level
         for obs_c, obs_z, obs_y, obs_x, _ in obs_points_actual:
             if obs_c == c and obs_z == depth_level:
                 ax.scatter(obs_x, obs_y, c='red', marker='x', s=5)
@@ -85,40 +83,47 @@ def plot_ensemble_results_3d(
 
         # --- Row 4: Ensemble Spread (Uncertainty) ---
         ax = axes[0, 1]
-        im = ax.imshow(masked_spread, cmap='inferno', origin='lower')
+        im = ax.imshow(masked_spread, cmap='inferno', origin='lower', vmin=0, vmax=vstd)
         plt.colorbar(im, ax=ax, label='Std. Dev.')
         ax.set_title(f'Ensemble Spread (Uncertainty)')
 
+        # --- Helper for Weighted RMSE ---
+        def weighted_rmse(error, weights, mask):
+            valid_mask = (mask == 1) & ~np.isnan(error)
+            if np.sum(valid_mask) == 0: return np.nan
+            weighted_sq_error = (error[valid_mask]**2) * weights[valid_mask]
+            sum_of_weights = np.sum(weights[valid_mask])
+            return np.sqrt(np.sum(weighted_sq_error) / sum_of_weights)
+
         # --- Row 5: Climatological Error ---
         ax = axes[1, 1]
-        rmse = np.sqrt(np.nanmean(clim_error**2))
+        rmse = weighted_rmse(clim_error, area_weights_np, land_mask_np)
         bias = np.nanmean(clim_error)
         im = ax.imshow(clim_error, cmap=error_cmap, origin='lower', vmin=-verror, vmax=verror)
         plt.colorbar(im, ax=ax, label='Error')
-        ax.set_title(f'Climatology Error (RMSE: {rmse:.2f}, Bias: {bias:.2f})')
+        ax.set_title(f'Climatology Error (wRMSE: {rmse:.4f}, Bias: {bias:.4f})')
 
         # --- Row 6: Mean Error (Bias) ---
         ax = axes[2, 1]
-        rmse = np.sqrt(np.nanmean(masked_error**2))
+        rmse = weighted_rmse(masked_error, area_weights_np, land_mask_np)
         bias = np.nanmean(masked_error)
         im = ax.imshow(masked_error, cmap=error_cmap, origin='lower', vmin=-verror, vmax=verror)
         plt.colorbar(im, ax=ax, label='Error')
-        ax.set_title(f'Ensemble Mean Error (RMSE: {rmse:.2f}, Bias: {bias:.2f})')
+        ax.set_title(f'Ensemble Mean Error (wRMSE: {rmse:.4f}, Bias: {bias:.4f})')
 
-        for ax in axes[-1,:]:
-            ax.set_xlabel('Longitude Index')
-        for ax in axes.flat:
-            ax.set_ylabel('Latitude Index')
-
+        for ax_row in axes:
+            for ax_ in ax_row:
+                ax_.set_xticks([])
+                ax_.set_yticks([])
+        
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        fig.suptitle(f'Ch{c} Ensemble Analysis for {sample_day_datetime.strftime("%Y-%m-%d")} at Depth {depth_level} {depth}', fontsize=16)
+        fig.suptitle(f'Ch{c} Ensemble Analysis for {sample_day_datetime.strftime("%Y-%m-%d")} at Depth {depth_level} ({depth:.2f}m)', fontsize=16)
 
-        # Construct a descriptive filename that includes the depth level
         plot_save_path = os.path.join(
             config.sample_plot_dir,
             f"ensemble_ch{c}_obs{num_obs_points}_day{sample_day_datetime.dayofyear}_"
             f"depth{depth_level}_ens{select_size or config.ensemble_size}_{config.sampling_method}.png"
         )
         plt.savefig(plot_save_path, dpi=150)
-        print(f"Ensemble plot for depth {depth_level} {depth} saved to {plot_save_path}")
+        print(f"Ensemble plot for depth {depth_level} saved to {plot_save_path}")
         plt.close(fig)

@@ -16,14 +16,15 @@ class Config:
         filepath_s=None,
         filepath_t_test=None,
         filepath_s_test=None,
-        filepath_static=None, # Used for grid info and static fields like ocean depth
+        filepath_static=None, 
         filepath_mask=None,
         filepath_z_static=None,
         varname_t='T',
         varname_s='S',
         varname_lat='lat',
         varname_lon='lon',
-        mask_varname='wet', # Variable name for the land/ocean mask in the static file
+        mask_varname='wet',
+        area_weight_varname='area_t',
         filepath_t_clim=None,
 
         # --- Data Slicing and Subsetting ---
@@ -44,17 +45,11 @@ class Config:
 
         # --- U-Net Architecture ---
         architecture_style="factorized_2d",
-        
-        # Example for separate encoders: [[0], [1]] for a 2-channel input
-        # Example for a shared encoder: [[0, 1]]
         vertical_encoder_groups=[[0], [1]], 
-        # Must have the same number of elements as vertical_encoder_groups
         vertical_latent_dims=[32, 32], 
-
-        # Shared architecture parameters
-        base_unet_channels=32,
+        base_unet_channels=64,
         channel_multipliers=(1, 2, 4, 8),
-        attn_resolutions=(8,), 
+        attn_resolutions=(16,), 
         num_res_blocks=2,
         dropout_prob=0.1,
 
@@ -86,7 +81,6 @@ class Config:
         co2_filepath=None,
         co2_varname='co2',
         co2_range=[320,450],
-
         location_embedding_types=[
             "lat", "lon_cyclical", "cos_lat", "coriolis", "ocean_depth"
         ],
@@ -113,26 +107,16 @@ class Config:
         plot_depth_levels=[0]
         ):
         
-        # --- Basic Setup ---
         self.test_id = test_id
         self.data_shape = data_shape
         self.use_salinity = use_salinity
         self.channels = 2 if self.use_salinity else 1
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # --- Path and Data Settings ---
-        self.filepath_t = [
-            filepath_t.format(year=year) for year in range(training_years[0],training_years[1]+1)
-        ]
-        self.filepath_s = [
-            filepath_s.format(year=year) for year in range(training_years[0],training_years[1]+1)
-        ] if self.use_salinity and filepath_s else None
-        self.filepath_t_test = [
-            filepath_t_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)
-        ]
-        self.filepath_s_test = [
-            filepath_s_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)
-        ] if self.use_salinity and filepath_s_test else None
+        self.filepath_t = [filepath_t.format(year=year) for year in range(training_years[0],training_years[1]+1)]
+        self.filepath_s = [filepath_s.format(year=year) for year in range(training_years[0],training_years[1]+1)] if self.use_salinity and filepath_s else None
+        self.filepath_t_test = [filepath_t_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)]
+        self.filepath_s_test = [filepath_s_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)] if self.use_salinity and filepath_s_test else None
         
         self.filepath_static = filepath_static
         self.filepath_mask = filepath_mask
@@ -143,6 +127,7 @@ class Config:
         self.varname_lat = varname_lat
         self.varname_lon = varname_lon
         self.filepath_t_clim = filepath_t_clim
+        self.area_weight_varname = area_weight_varname
         
         self.depth_range = depth_range
         self.lat_range = lat_range
@@ -153,12 +138,10 @@ class Config:
         self.T_range = T_range
         self.S_range = S_range
 
-        # --- Output Directory Management ---
         self.scratch_dir = "/scratch/cimes/feiyul/Diffusion_OceanDA"
         self.output_dir = f"{self.scratch_dir}/{self.test_id}"
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # --- Store Model and Training Settings ---
         self.timesteps = timesteps
         self.beta_start = beta_start
         self.beta_end = beta_end
@@ -195,15 +178,11 @@ class Config:
         self.co2_filepath = co2_filepath
         self.co2_varname = co2_varname
         self.co2_range = co2_range
-
         self.location_embedding_types = location_embedding_types
         
         self.location_embedding_channels = 0
         if self.location_embedding_types:
-            type_counts = {
-                "lat": 1, "lon": 1, "lon_cyclical": 2, "cos_lat": 1,
-                "coriolis": 1, "ocean_depth": 1, "grid_area": 1
-                }
+            type_counts = {"lat": 1, "lon": 1, "lon_cyclical": 2, "cos_lat": 1, "coriolis": 1, "ocean_depth": 1, "grid_area": 1}
             for emb_type in self.location_embedding_types:
                 self.location_embedding_channels += type_counts.get(emb_type, 0)
  
@@ -234,24 +213,18 @@ class Config:
 
     @classmethod
     def from_json_file(cls, filepath):
-        """Loads configuration settings from a JSON file and returns a Config object."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Config file not found: {filepath}")
         with open(filepath, 'r') as f:
             settings = json.load(f)
         for key in ['data_shape', 'channel_multipliers', 'attn_resolutions', 'pixel_shuffle_size', 'vertical_encoder_groups', 'vertical_latent_dims']:
             if key in settings and isinstance(settings[key], list):
-                # Convert lists of lists to tuples of tuples for immutability if needed, but lists are fine for config
                 pass
         return cls(**settings)
 
     def to_json_file(self, filepath):
-        """Saves the current configuration settings to a JSON file."""
         settings = self.__dict__.copy()
-        non_serializable_keys = [
-            'device', 'model_checkpoint_dir', 'loss_plot_dir', 
-            'sample_plot_dir', 'training_animation_path'
-            ]
+        non_serializable_keys = ['device', 'model_checkpoint_dir', 'loss_plot_dir', 'sample_plot_dir', 'training_animation_path']
         for key in non_serializable_keys:
             if key in settings:
                 del settings[key]
