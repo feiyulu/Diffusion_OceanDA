@@ -27,11 +27,12 @@ def plot_losses(train_losses, val_losses, save_path):
 
 def plot_ensemble_results_3d(
     ensemble_mean, ensemble_spread, true_sample, clim_pred,
-    obs_points_actual, land_mask_np, area_weights_np, config, sample_day_datetime,
+    observed_mask_np,
+    land_mask_np, area_weights_np, config, sample_day_datetime,
     num_obs_points, depth_level, depth, select_size=None):
     """
     Visualizes a specific depth level of the 3D ensemble sampling results,
-    using area-weighted RMSE for more accurate error metrics.
+    plotting observations directly from the provided mask.
     """
     print(f"\nVisualizing and saving results for depth level {depth_level}...")
 
@@ -63,11 +64,16 @@ def plot_ensemble_results_3d(
         # --- Row 1: Ground Truth ---
         ax = axes[0, 0]
         im = ax.imshow(masked_true, cmap=cmap, origin='lower', vmin=vmin, vmax=vmax)
-        for obs_c, obs_z, obs_y, obs_x, _ in obs_points_actual:
-            if obs_c == c and obs_z == depth_level:
-                ax.scatter(obs_x, obs_y, c='red', marker='x', s=5)
+        
+        channel_mask_for_level = observed_mask_np[c, depth_level, :, :]
+        obs_y, obs_x = np.where(channel_mask_for_level)
+        if len(obs_y) > 0:
+            title_str = f'Obs {len(obs_y)}'
+            if depth_level > 0:
+                ax.scatter(obs_x, obs_y, c='red', marker='x', s=1, label='Observations')
+
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Ground Truth (Depth {depth_level}: {depth})')
+        ax.set_title(f'Ground Truth (Depth {depth_level}: {depth}, {title_str})')
 
         # --- Row 2: Climatology ---
         ax = axes[1, 0]

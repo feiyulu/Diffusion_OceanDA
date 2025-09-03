@@ -15,7 +15,7 @@ from data_utils import load_static_data, load_test_ocean_slice
 from unet_model import UNet
 from diffusion_process import Diffusion
 from sampling_utils import sample_conditional
-from observation_utils import map_real_obs_to_grid_3d
+from observation_utils import create_observation_tensors
 from plotting_utils import plot_ensemble_results_3d
 
 if __name__ == "__main__":
@@ -37,10 +37,7 @@ if __name__ == "__main__":
     print(f"Sampling batch size: {config.sampling_batch_size}")
 
     model = UNet(config).to(config.device)
-    diffusion = Diffusion(
-        timesteps=config.timesteps, beta_start=config.beta_start, 
-        beta_end=config.beta_end, device=config.device
-    )
+    diffusion = Diffusion(timesteps=config.timesteps, beta_start=config.beta_start, beta_end=config.beta_end, device=config.device)
 
     state_dict = None
     checkpoint_dir = config.model_checkpoint_dir
@@ -50,29 +47,21 @@ if __name__ == "__main__":
         for checkpoint_path in all_checkpoints:
             try:
                 if checkpoint_path.endswith('.pth'):
-                    print(f"Attempting to load .pth checkpoint: {os.path.basename(checkpoint_path)}")
-                    checkpoint_data = torch.load(checkpoint_path, map_location=config.device, weights_only=False)
+                    checkpoint_data = torch.load(checkpoint_path, map_location=config.device)
                     state_dict = checkpoint_data['model_state_dict']
-                    print("Successfully loaded model state from .pth file.")
                     break
                 elif os.path.isdir(checkpoint_path) and os.path.basename(checkpoint_path).startswith('epoch_'):
-                    print(f"Attempting to load Accelerate checkpoint: {os.path.basename(checkpoint_path)}")
                     model_file = os.path.join(checkpoint_path, "pytorch_model.bin")
-                    if not os.path.exists(model_file):
-                         model_file = os.path.join(checkpoint_path, "model.safetensors")
                     if os.path.exists(model_file):
-                        state_dict = torch.load(model_file, map_location=config.device, weights_only=False)
-                        print("Successfully loaded model state from Accelerate checkpoint.")
+                        state_dict = torch.load(model_file, map_location=config.device)
                         break
-            except (pickle.UnpicklingError, RuntimeError, EOFError) as e:
-                print(f"Warning: Could not load checkpoint {os.path.basename(checkpoint_path)}. It may be corrupted. Trying next...")
+            except Exception as e:
+                print(f"Warning: Could not load checkpoint {os.path.basename(checkpoint_path)}. Error: {e}")
                 continue
-    
-    if state_dict is None:
-        raise FileNotFoundError(f"No valid, uncorrupted model checkpoint found in {checkpoint_dir}.")
-    
+    if state_dict is None: raise FileNotFoundError(f"No valid model checkpoint found in {checkpoint_dir}.")
     model.load_state_dict(state_dict)
     print("Model loaded successfully.")
+
 
     z_ds=xr.open_dataset(config.filepath_z_static)
     z_da=z_ds['z']
@@ -100,42 +89,14 @@ if __name__ == "__main__":
                 lon=slice(config.lon_range[0], config.lon_range[1]))
             clim_pred = (clim_da - config.T_range[0]) / (config.T_range[1]-config.T_range[0])
 
-            if config.use_real_observations:
-                observations, observed_mask, obs_points_actual = map_real_obs_to_grid_3d(
-                    config, sample_day_str, true_sample.shape
-                )
-                num_obs_points = len(obs_points_actual)
-            else:
-                print("Generating synthetic observations by sampling vertical columns...")
-                num_profiles = config.observation_samples[0]
-                observations = torch.zeros_like(true_sample)
-                observed_mask = torch.zeros_like(true_sample, dtype=torch.bool)
-                
-                surface_mask = land_mask[0, 0, 0]
-                ocean_coords_h, ocean_coords_w = torch.where(surface_mask.squeeze() == 1)
-                all_ocean_locations_2d = list(zip(ocean_coords_h.cpu().numpy(), ocean_coords_w.cpu().numpy()))
 
-                if not all_ocean_locations_2d:
-                    raise ValueError("Land mask is all land. Cannot generate synthetic observations.")
+            # --- Generate observations using the flexible dispatcher ---
+            observations, observed_mask, guidance_strength = create_observation_tensors(
+                config, sample_day_str, true_sample, land_mask
+            )
+            num_obs_points = torch.sum(observed_mask).item()
 
-                num_profiles_to_sample = min(len(all_ocean_locations_2d), num_profiles)
-                sampled_indices = np.random.choice(len(all_ocean_locations_2d), num_profiles_to_sample, replace=False)
-                
-                obs_points_actual = []
-                for idx in sampled_indices:
-                    y, x = all_ocean_locations_2d[idx]
-                    for z in range(config.data_shape[0]):
-                        if land_mask[0, 0, z, y, x] == 1:
-                            for c in range(config.channels):
-                                val = true_sample[0, c, z, y, x].item()
-                                observations[0, c, z, y, x] = val
-                                observed_mask[0, c, z, y, x] = True
-                                obs_points_actual.append((c, z, y, x, val))
-                
-                num_obs_points = len(obs_points_actual)
-                print(f"Generated {num_obs_points} observation points from {num_profiles_to_sample} vertical profiles.")
-
-            print(f"Generating ensemble of size {config.ensemble_size} with {num_obs_points} observations...")
+            print(f"Generating ensemble of size {config.ensemble_size}...")
             ensemble_members = []
             batch_size = config.sampling_batch_size
             num_generated = 0
@@ -148,6 +109,7 @@ if __name__ == "__main__":
                         model, diffusion, config,
                         observations=observations.to(device), 
                         observed_mask=observed_mask.to(device),
+                        guidance_strength_mask=guidance_strength.to(device),
                         land_mask=land_mask,
                         target_conditions=true_conditions,
                         target_location_field=target_location_field,
@@ -166,13 +128,15 @@ if __name__ == "__main__":
                 ensemble_spread = torch.std(ensemble_tensor, dim=0)
 
                 area_weights_np = area_weights.squeeze(0).cpu().numpy()
+                
+                observed_mask_np = observed_mask.squeeze(0).cpu().numpy()
 
                 for depth_idx in config.plot_depth_levels:
                     plot_ensemble_results_3d(
                         ensemble_mean, ensemble_spread, true_sample.squeeze(0).cpu(), clim_pred, 
-                        obs_points_actual, land_mask[0, 0, depth_idx].cpu().numpy(),
-                        area_weights_np,
-                        config, sample_day_str, num_obs_points,
+                        observed_mask_np,
+                        land_mask[0, 0, depth_idx].cpu().numpy(),
+                        area_weights_np, config, sample_day_str, num_obs_points,
                         depth_level=depth_idx, depth=z_da[depth_idx].values
                     )
             else:

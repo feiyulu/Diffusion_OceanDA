@@ -1,6 +1,6 @@
 # --- observation_utils.py ---
-# This file contains utility functions for processing and assimilating
-# irregularly spaced observations into the model's 3D grid.
+# This file contains a flexible framework for processing and assimilating
+# multiple types of observations into the model's grid.
 
 import torch
 import numpy as np
@@ -8,105 +8,103 @@ import xarray as xr
 import pandas as pd
 from scipy.spatial import cKDTree
 
-def create_observation_tensors(config, sample_day_datetime, true_sample_shape):
+# --- Main Dispatcher ---
+def create_observation_tensors(config, sample_day_datetime, true_sample, land_mask):
     """
-    Main dispatcher for creating observation tensors.
-    It can generate synthetic observations or process real sparse data.
+    Main dispatcher for creating observation tensors from multiple sources.
+    Reads the `observation_sources` from the config and calls the appropriate handler for each.
     """
-    if config.use_real_observations:
-        print(f"Using real observations with '{config.observation_operator}' operator.")
-        if config.observation_operator == "nearest_neighbor":
-            return map_real_obs_to_grid_3d(config, sample_day_datetime, true_sample_shape)
+    _, C, D, H, W = true_sample.shape
+    
+    # Initialize combined tensors
+    combined_observations = torch.zeros_like(true_sample)
+    combined_mask = torch.zeros_like(true_sample, dtype=torch.bool)
+    combined_guidance_strength = torch.zeros_like(true_sample)
+    
+    total_obs_points = 0
+
+    for source in config.observation_sources:
+        if not source.get("enabled", False):
+            continue
+
+        print(f"--- Processing observation source: {source['name']} ---")
+        obs_type = source['type'].lower()
+        
+        obs_values, obs_mask = None, None
+
+        if obs_type == "synthetic_profiles":
+            obs_values, obs_mask = process_synthetic_profiles(source, true_sample, land_mask)
+        elif obs_type == "synthetic_surface":
+            obs_values, obs_mask = process_synthetic_surface(source, true_sample, land_mask)
+        # Future real data handlers would go here
+        # elif obs_type == "real_argo":
+        #     obs_values, obs_mask = process_real_argo(source, config, sample_day_datetime)
         else:
-            raise ValueError(f"Unknown observation operator: {config.observation_operator}")
-    else:
-        print("Generating synthetic observations from ground truth.")
-        # This part needs the ground truth data, so it's better handled in the main sampling script.
-        # This function will now focus only on real observations.
-        return None, None, None
+            print(f"Warning: Unknown observation type '{source['type']}'. Skipping.")
+            continue
+            
+        if obs_values is not None:
+            # Add the processed observations to the combined tensors
+            valid_mask = obs_mask.bool()
+            combined_observations[valid_mask] = obs_values[valid_mask]
+            combined_mask[valid_mask] = True
+            combined_guidance_strength[valid_mask] = source.get("guidance_strength", 1.0)
+            num_points = torch.sum(valid_mask).item()
+            total_obs_points += num_points
+            print(f"Added {num_points} observation points from {source['name']}.")
+
+    print(f"\nTotal observation points created: {total_obs_points}")
+    return combined_observations, combined_mask, combined_guidance_strength
 
 
-def map_real_obs_to_grid_3d(config, sample_day_datetime, true_sample_shape):
+# --- Observation Type Handlers ---
+
+def process_synthetic_profiles(source_config, true_sample, land_mask):
     """
-    Loads sparse observational data and maps it to the model's 3D grid.
-    This function now works with 3D data, assuming observations are at the surface (z=0).
+    Generates sparse vertical profile observations by sampling columns from the ground truth.
     """
-    print("Loading and processing sparse observations for 3D grid...")
+    print(f"Generating {source_config['num_profiles']} synthetic profiles...")
+    _, C, D, H, W = true_sample.shape
+    observations = torch.zeros_like(true_sample)
+    observed_mask = torch.zeros_like(true_sample, dtype=torch.bool)
+
+    # Find all possible ocean surface locations to sample from
+    surface_mask = land_mask[0, 0, 0].cpu().numpy()
+    ocean_coords_y, ocean_coords_x = np.where(surface_mask == 1)
     
-    # 1. Load the pre-processed observation file
-    year = sample_day_datetime.year
-    obs_path = config.observation_path_template.format(year=year)
-    try:
-        obs_ds = xr.open_dataset(obs_path)
-    except FileNotFoundError:
-        print(f"Warning: Observation file not found at {obs_path}. Returning empty observations.")
-        return torch.zeros(true_sample_shape), torch.zeros(true_sample_shape, dtype=torch.bool), []
+    if len(ocean_coords_y) == 0:
+        print("Warning: No ocean points found in mask. Cannot generate profiles.")
+        return None, None
 
-    # 2. Filter observations within the specified time window
-    time_window = pd.Timedelta(days=config.observation_time_window_days)
-    start_time = sample_day_datetime - time_window
-    end_time = sample_day_datetime + time_window
-    obs_in_window = obs_ds.sel(time=slice(start_time, end_time))
+    num_profiles_to_sample = min(len(ocean_coords_y), source_config['num_profiles'])
+    sampled_indices = np.random.choice(len(ocean_coords_y), num_profiles_to_sample, replace=False)
+
+    for idx in sampled_indices:
+        y, x = ocean_coords_y[idx], ocean_coords_x[idx]
+        # Copy the entire vertical column from the true sample
+        observations[0, :, :, y, x] = true_sample[0, :, :, y, x]
+        observed_mask[0, :, :, y, x] = True
+
+    return observations, observed_mask
+
+
+def process_synthetic_surface(source_config, true_sample, land_mask):
+    """
+    Generates dense surface observations from the ground truth.
+    """
+    target_channel = source_config.get("target_channel", 0)
+    print(f"Generating synthetic surface data for channel {target_channel}...")
     
-    if obs_in_window.sizes['profile'] == 0:
-        print("Warning: No observations found within the time window. Returning empty observations.")
-        return torch.zeros(true_sample_shape), torch.zeros(true_sample_shape, dtype=torch.bool), []
+    observations = torch.zeros_like(true_sample)
+    observed_mask = torch.zeros_like(true_sample, dtype=torch.bool)
     
-    # 3. Load the model's static grid to get geolat/geolon
-    with xr.open_dataset(config.filepath_static) as static_ds:
-        if not (config.varname_lat == 'lat' and config.varname_lon == 'lon'):
-            static_ds = static_ds.rename({config.varname_lat: 'lat', config.varname_lon: 'lon'})
-
-        model_lats = static_ds['geolat'].isel(
-            lat=slice(config.lat_range[0], config.lat_range[1]), 
-            lon=slice(config.lon_range[0], config.lon_range[1])
-        ).values
-        model_lons = static_ds['geolon'].isel(
-            lat=slice(config.lat_range[0], config.lat_range[1]), 
-            lon=slice(config.lon_range[0], config.lon_range[1])
-        ).values
+    # Get the surface layer (z=0) from the true sample for the specified channel
+    surface_data = true_sample[0, target_channel, 0, :, :]
     
-    # 4. Create a KD-Tree for efficient nearest-neighbor search on the 2D horizontal grid
-    grid_points_2d = np.vstack([model_lats.ravel(), model_lons.ravel()]).T
-    kdtree = cKDTree(grid_points_2d)
-
-    # 5. Initialize output tensors with the correct 5D shape
-    # Shape: (N, C, D, H, W)
-    observations_tensor = torch.zeros(true_sample_shape)
-    observed_mask_tensor = torch.zeros(true_sample_shape, dtype=torch.bool)
-    obs_points_for_plotting = []
-
-    # 6. Map each observation to the nearest model grid cell at the surface (z=0)
-    for i in range(len(obs_in_window.profile)):
-        obs_lat = obs_in_window.lat[i].item()
-        obs_lon = obs_in_window.lon[i].item()
-        
-        # Find nearest (y, x) grid index
-        _, nearest_idx = kdtree.query([obs_lat, obs_lon])
-        y, x = np.unravel_index(nearest_idx, model_lats.shape)
-        
-        # Assume all observations are for the surface layer (depth index z=0)
-        z = 0
-
-        # Process Temperature (channel 0)
-        # We take the shallowest observation value
-        temp_val = obs_in_window.T[i, 0].item() 
-        if not np.isnan(temp_val):
-            norm_temp = (temp_val - config.T_range[0]) / (config.T_range[1] - config.T_range[0])
-            observations_tensor[0, 0, z, y, x] = norm_temp
-            observed_mask_tensor[0, 0, z, y, x] = True
-            # Store as (channel, z, y, x, value) for plotting
-            obs_points_for_plotting.append((0, z, y, x, norm_temp))
-
-        # Process Salinity (channel 1) if enabled
-        if config.use_salinity:
-            salt_val = obs_in_window.S[i, 0].item()
-            if not np.isnan(salt_val):
-                norm_salt = (salt_val - config.S_range[0]) / (config.S_range[1] - config.S_range[0])
-                observations_tensor[0, 1, z, y, x] = norm_salt
-                observed_mask_tensor[0, 1, z, y, x] = True
-                obs_points_for_plotting.append((1, z, y, x, norm_salt))
-
-    num_obs = len(obs_points_for_plotting)
-    print(f"Successfully created observation tensor with {num_obs} points at the surface layer.")
-    return observations_tensor, observed_mask_tensor, obs_points_for_plotting
+    # Apply the land mask
+    surface_mask = land_mask[0, 0, 0, :, :].bool()
+    
+    observations[0, target_channel, 0, :, :][surface_mask] = surface_data[surface_mask]
+    observed_mask[0, target_channel, 0, :, :][surface_mask] = True
+    
+    return observations, observed_mask

@@ -24,8 +24,8 @@ class Config:
         varname_lat='lat',
         varname_lon='lon',
         mask_varname='wet',
-        area_weight_varname='area_t',
         filepath_t_clim=None,
+        area_weight_varname='area_t',
 
         # --- Data Slicing and Subsetting ---
         depth_range=[0,25],
@@ -45,8 +45,8 @@ class Config:
 
         # --- U-Net Architecture ---
         architecture_style="factorized_2d",
-        vertical_encoder_groups=[[0], [1]], 
-        vertical_latent_dims=[32, 32], 
+        vertical_encoder_groups=[[0]], 
+        vertical_latent_dims=[32], 
         base_unet_channels=64,
         channel_multipliers=(1, 2, 4, 8),
         attn_resolutions=(16,), 
@@ -55,10 +55,10 @@ class Config:
 
         # --- Training Parameters ---
         epochs=100,
-        batch_size=200,
+        batch_size=8,
         learning_rate=1e-4,
-        use_checkpointing=False,
-        use_amp=False,
+        use_checkpointing=True,
+        use_amp=True,
         use_lr_scheduler=True,
         lr_scheduler_T_max=100,
         lr_scheduler_eta_min=1e-6, 
@@ -81,9 +81,7 @@ class Config:
         co2_filepath=None,
         co2_varname='co2',
         co2_range=[320,450],
-        location_embedding_types=[
-            "lat", "lon_cyclical", "cos_lat", "coriolis", "ocean_depth"
-        ],
+        location_embedding_types=["lon_cyclical", "cos_lat", "coriolis"],
 
         # --- Sampling Parameters ---
         sampling_method='ddpm',
@@ -91,23 +89,37 @@ class Config:
         sampling_batch_size=4,
         sampling_steps=20,
         ddim_eta=0.0,
-        observation_fidelity_weight=1.0,
-
+        
         # --- Observation Settings ---
-        use_real_observations=False,
-        observation_path_template="/path/to/obs_data/argo/argo_{year}_interp.nc",
-        observation_time_window_days=3,
-        observation_operator="nearest_neighbor",
-        observation_samples=[1000],
+        observation_sources=[
+            {
+                "name": "synthetic_argo",
+                "type": "synthetic_profiles",
+                "enabled": True,
+                "num_profiles": 100,
+                "guidance_strength": 1.0,
+                "operator": "point_replacement"
+            },
+            {
+                "name": "synthetic_sst",
+                "type": "synthetic_surface",
+                "enabled": False, # Disabled by default
+                "target_channel": 0, # e.g., Temperature
+                "guidance_strength": 0.5,
+                "operator": "point_replacement",
+                "subsample_fraction": 0.05 # Use only 5% of SST data for guidance
+            }
+        ],
 
         # --- Evaluation Settings ---
         sample_years=[2024,2025],
         sample_days=[[0]],
-        generate_training_animation=True,
+        generate_training_animation=False,
         plot_depth_levels=[0]
         ):
         
         self.test_id = test_id
+        # ... (rest of the __init__ is the same, no changes needed)
         self.data_shape = data_shape
         self.use_salinity = use_salinity
         self.channels = 2 if self.use_salinity else 1
@@ -191,12 +203,8 @@ class Config:
         self.sampling_batch_size = sampling_batch_size
         self.sampling_steps = sampling_steps
         self.ddim_eta = ddim_eta
-        self.observation_fidelity_weight = observation_fidelity_weight
-        self.observation_samples = observation_samples
-        self.use_real_observations = use_real_observations
-        self.observation_path_template = observation_path_template
-        self.observation_time_window_days = observation_time_window_days
-        self.observation_operator = observation_operator
+        
+        self.observation_sources = observation_sources
 
         self.sample_years = sample_years
         self.sample_days = sample_days
@@ -217,7 +225,7 @@ class Config:
             raise FileNotFoundError(f"Config file not found: {filepath}")
         with open(filepath, 'r') as f:
             settings = json.load(f)
-        for key in ['data_shape', 'channel_multipliers', 'attn_resolutions', 'pixel_shuffle_size', 'vertical_encoder_groups', 'vertical_latent_dims']:
+        for key in ['data_shape', 'channel_multipliers', 'attn_resolutions', 'pixel_shuffle_size', 'vertical_encoder_groups', 'vertical_latent_dims', 'observation_sources']:
             if key in settings and isinstance(settings[key], list):
                 pass
         return cls(**settings)
