@@ -1,8 +1,5 @@
 # --- unet_model.py ---
 # This file defines the U-Net architecture, including the custom PartialConv3d layer.
-# REFACTORED: Implemented a factorized pseudo-3D architecture with a configurable
-# multi-encoder/multi-decoder design. Input channels can be grouped to share
-# vertical encoders, allowing the model to learn both specialized and joint representations.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,20 +79,18 @@ class VerticalEncoder(nn.Module):
         self.fc = nn.Linear(depth_size * latent_dim, latent_dim)
         
     def forward(self, x, mask):
-        # x shape: (n, num_channels_in_group, d, h, w)
         n, c, d, h, w = x.shape
         x_reshaped = rearrange(x, 'n c d h w -> (n h w) c d')
-        # Use the mask of the first channel in the group as representative
         mask_reshaped = rearrange(mask, 'n c d h w -> (n h w) c d')[:, :1, :]
         
         x_conv, mask_conv = self.conv_in(x_reshaped, mask_reshaped)
-        x_act = self.act(x_conv) * mask_conv
-        
+        x_act = self.act(x_conv)
+        x_act = x_act * mask_conv
+
         x_flat = rearrange(x_act, 'b c d -> b (c d)')
         x_encoded = self.fc(x_flat)
         
         output = rearrange(x_encoded, '(n h w) ld -> n ld h w', n=n, h=h, w=w)
-        # The horizontal mask is the max projection of the multi-channel 3D mask
         horizontal_mask = (torch.sum(mask, dim=(1,2)) > 0).float().unsqueeze(1)
         return output, horizontal_mask
 
@@ -117,24 +112,27 @@ class VerticalDecoder(nn.Module):
         x_unflat = rearrange(x_fc, 'b (ld d) -> b ld d', d=self.depth_size, ld=self.latent_dim)
         x_act = self.act(x_unflat)
 
-        # Use the representative mask for the group, reshaped for the 1D conv
         mask_reshaped = rearrange(original_mask_3d_group, 'n c d h w -> (n h w) c d')[:, :1, :]
         
-        x_decoded, _ = self.conv_out(x_act, mask_reshaped)
+        # BUG FIX: Use the mask propagated by the PartialConv1d layer itself.
+        x_decoded, mask_decoded_1d = self.conv_out(x_act, mask_reshaped)
+        
         output = rearrange(x_decoded, '(n h w) c d -> n c d h w', n=n, h=h, w=w)
-        return output
+        final_mask_5d = rearrange(mask_decoded_1d, '(n h w) c d -> n c d h w', n=n, h=h, w=w)
+        
+        return output * final_mask_5d
 
-# --- Core 2D U-Net Components (Unchanged) ---
+# --- Core 2D U-Net Components ---
 
 class ResidualBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, time_embedding_dim, dropout_prob):
         super().__init__()
         self.conv1 = PartialConv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.GroupNorm(8 if out_channels % 8 == 0 else out_channels, out_channels)
+        self.norm1 = nn.GroupNorm(8 if out_channels % 8 == 0 else 1, out_channels)
         self.act1 = nn.SiLU()
         self.time_mlp = nn.Linear(time_embedding_dim, out_channels * 2) if time_embedding_dim > 0 else None
         self.conv2 = PartialConv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.norm2 = nn.GroupNorm(8 if out_channels % 8 == 0 else out_channels, out_channels)
+        self.norm2 = nn.GroupNorm(8 if out_channels % 8 == 0 else 1, out_channels)
         self.act2 = nn.SiLU()
         self.residual_conv = PartialConv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
         self.dropout = nn.Dropout(dropout_prob)
@@ -148,6 +146,7 @@ class ResidualBlock2D(nn.Module):
             h = h * (1 + scale) + shift
         h, h_mask = self.conv2(h, h_mask); h = self.norm2(h); h = self.act2(h); h = self.dropout(h)
         residual, residual_mask = self.residual_conv(x, mask) if isinstance(self.residual_conv, PartialConv2d) else (self.residual_conv(x), mask)
+        
         combined_mask = h_mask * residual_mask
         return (h + residual) * combined_mask, combined_mask
 
@@ -155,7 +154,7 @@ class SelfAttentionBlock2D(nn.Module):
     def __init__(self, channels, num_heads=4):
         super().__init__()
         self.num_heads = num_heads
-        self.norm = nn.GroupNorm(8 if channels % 8 == 0 else channels, channels)
+        self.norm = nn.GroupNorm(8 if channels % 8 == 0 else 1, channels)
         self.to_qkv = nn.Conv2d(channels, channels * 3, 1)
         self.proj_out = nn.Conv2d(channels, channels, 1)
 
@@ -185,14 +184,18 @@ class DownBlock2D(nn.Module):
 
     def forward(self, x, time_emb, mask, use_checkpointing=False, should_log=False, stage_name=""):
         skip_outputs = []
+        current_x, current_mask = x, mask
+        
         for i, res_block in enumerate(self.res_blocks):
-            x, mask = checkpoint(res_block, x, time_emb, mask, use_reentrant=False) if use_checkpointing else res_block(x, time_emb, mask)
-            if should_log: print(f"    {stage_name} ResBlock {i+1} Out: {x.shape}")
-            skip_outputs.append(x)
+            current_x, current_mask = checkpoint(res_block, current_x, time_emb, current_mask, use_reentrant=False) if use_checkpointing else res_block(current_x, time_emb, current_mask)
+            if should_log: print(f"    {stage_name} ResBlock {i+1} Out: {current_x.shape}")
+            skip_outputs.append((current_x, current_mask))
+            
         if isinstance(self.attn_block, SelfAttentionBlock2D):
-            x, mask = self.attn_block(x, mask)
-            if should_log: print(f"    {stage_name} SelfAttn Out: {x.shape}")
-        x_down, mask_down = self.downsample(x, mask)
+            current_x, current_mask = self.attn_block(current_x, current_mask)
+            if should_log: print(f"    {stage_name} SelfAttn Out: {current_x.shape}")
+            
+        x_down, mask_down = self.downsample(current_x, current_mask)
         return x_down, mask_down, skip_outputs
 
 class UpBlock2D(nn.Module):
@@ -205,24 +208,31 @@ class UpBlock2D(nn.Module):
         ])
         self.attn_block = SelfAttentionBlock2D(out_channels) if has_attn else nn.Identity()
 
-    def forward(self, x, skip_xs, time_emb, mask, use_checkpointing=False, should_log=False, stage_name=""):
-        target_shape = skip_xs[0].shape[-2:] # Get target H, W
+    def forward(self, x, skip_xs_with_masks, time_emb, mask, use_checkpointing=False, should_log=False, stage_name=""):
+        target_shape = skip_xs_with_masks[0][0].shape[-2:]
         x = F.interpolate(x, size=target_shape, mode='bilinear', align_corners=False)
         mask = F.interpolate(mask, size=target_shape, mode='nearest')
         
         x, mask = self.conv_after_upsample(x, mask)
         
-        x = torch.cat([x] + skip_xs, dim=1)
-        if should_log: print(f"    {stage_name} After Skip Concat: {x.shape}")
-        mask = mask[:, :1, :, :].repeat(1, x.shape[1], 1, 1)
+        skip_tensors = [s for s, m in skip_xs_with_masks]
+        skip_masks = [m for s, m in skip_xs_with_masks]
+        
+        x = torch.cat([x] + skip_tensors, dim=1)
+        concatenated_mask = torch.cat([mask] + skip_masks, dim=1)
 
+        if should_log: print(f"    {stage_name} After Skip Concat: {x.shape}")
+
+        current_x, current_mask = x, concatenated_mask
         for i, res_block in enumerate(self.res_blocks):
-            x, mask = checkpoint(res_block, x, time_emb, mask, use_reentrant=False) if use_checkpointing else res_block(x, time_emb, mask)
-            if should_log: print(f"    {stage_name} ResBlock {i+1} Out: {x.shape}")
+            current_x, current_mask = checkpoint(res_block, current_x, time_emb, current_mask, use_reentrant=False) if use_checkpointing else res_block(current_x, time_emb, current_mask)
+            if should_log: print(f"    {stage_name} ResBlock {i+1} Out: {current_x.shape}")
+        
         if isinstance(self.attn_block, SelfAttentionBlock2D):
-            x, mask = self.attn_block(x, mask)
-            if should_log: print(f"    {stage_name} SelfAttn Out: {x.shape}")
-        return x, mask
+            current_x, current_mask = self.attn_block(current_x, current_mask)
+            if should_log: print(f"    {stage_name} SelfAttn Out: {current_x.shape}")
+            
+        return current_x, current_mask
 
 class UNet2D(nn.Module):
     _has_logged_forward = False
@@ -244,10 +254,8 @@ class UNet2D(nn.Module):
 
         for i, multiplier in enumerate(channel_multipliers):
             out_ch = base_channels * multiplier
-            # BUG FIX: The resolution check was off by one power of 2.
-            # It should check the resolution *after* the downsampling of the current stage.
-            current_res = h // (2**(i+1))
-            has_attn = current_res in attn_resolutions
+            current_res_h = h // (2**(i+1))
+            has_attn = current_res_h in attn_resolutions
             self.down_stages.append(DownBlock2D(current_channels, out_ch, time_embedding_dim, config.dropout_prob, has_attn, num_res_blocks))
             current_channels = out_ch
         
@@ -263,9 +271,8 @@ class UNet2D(nn.Module):
             in_ch = channel_multipliers[i+1] * base_channels if i + 1 < len(channel_multipliers) else current_channels
             out_ch = base_channels * multiplier
             skip_ch_in = out_ch * num_res_blocks
-            # Apply the same fix here for consistency
-            current_res = h // (2**(i+1))
-            has_attn = current_res in attn_resolutions
+            current_res_h = h // (2**(i+1))
+            has_attn = current_res_h in attn_resolutions
             self.up_stages.append(UpBlock2D(in_ch, skip_ch_in, out_ch, time_embedding_dim, config.dropout_prob, has_attn, num_res_blocks))
         
         self.final_conv = nn.Conv2d(base_channels, in_channels, kernel_size=1)
@@ -327,7 +334,6 @@ class UNet(nn.Module):
             nn.Linear(time_embedding_dim, time_embedding_dim)
         )
         
-        # NEW: Configurable multi-encoder/decoder architecture
         self.encoder_groups = config.vertical_encoder_groups
         self.latent_dims = config.vertical_latent_dims
         self.depth_size = config.data_shape[0]
@@ -350,7 +356,6 @@ class UNet(nn.Module):
         unet2d_in_channels = total_latent_dim + config.location_embedding_channels
         self.unet_2d = UNet2D(config, unet2d_in_channels)
         
-
     def forward(self, x, t, mask, conditions=None, location_field=None):
         is_main_process = not x.device.type == 'cuda' or x.device.index == 0
         should_log = is_main_process and not UNet._has_logged_forward
@@ -359,7 +364,6 @@ class UNet(nn.Module):
             print("\n--- UNet Wrapper Forward Pass ---")
             print(f"Initial Input 'x': {x.shape}")
 
-        # 1. Encode each channel group's vertical dimension
         latent_repr_list = []
         horizontal_mask_list = []
         for i, group in enumerate(self.encoder_groups):
@@ -371,12 +375,10 @@ class UNet(nn.Module):
             latent_repr_list.append(latent_repr)
             horizontal_mask_list.append(horizontal_mask)
 
-        # 2. Concatenate all latent representations and masks
         concatenated_latent_repr = torch.cat(latent_repr_list, dim=1)
         representative_horizontal_mask = horizontal_mask_list[0]
         if should_log: print(f"Concatenated Latent Repr: {concatenated_latent_repr.shape}")
 
-        # 3. Prepare inputs for the 2D U-Net by adding location embeddings
         if self.config.location_embedding_channels > 0 and location_field is not None:
             concatenated_latent_repr = torch.cat([concatenated_latent_repr, location_field], dim=1)
             location_mask = torch.ones_like(location_field)
@@ -387,10 +389,8 @@ class UNet(nn.Module):
 
         time_emb = self.time_mlp(t)
 
-        # 4. Run the 2D U-Net
         unet_output = self.unet_2d(concatenated_latent_repr, time_emb, unet_input_mask)
         
-        # 5. Decode each latent group back to the physical 3D space
         output_list = torch.zeros_like(x)
         
         latent_start_idx = 0
