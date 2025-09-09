@@ -6,6 +6,7 @@ import xarray as xr
 import pandas as pd
 import datetime
 import cftime
+import os.path
 
 def get_time_coordinates(config):
     """
@@ -27,8 +28,11 @@ def load_single_ocean_slice(config, time_coord):
     
     def _load_and_process_slice(filepaths, varname, time_coord, min_val, max_val):
         with xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True, chunks={'time': 1}) as ds:
-            if not (config.varname_lat=='lat' and config.varname_lon=='lon'):
-                ds = ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
+            # Use a more robust check for renaming coordinates
+            if config.varname_lat and config.varname_lat != 'lat':
+                ds = ds.rename({config.varname_lat:'lat'})
+            if config.varname_lon and config.varname_lon != 'lon':
+                ds = ds.rename({config.varname_lon:'lon'})
             
             da_sliced = ds[varname].sel(time=time_coord, method='nearest').isel(
                 z=slice(config.depth_range[0], config.depth_range[1]),
@@ -84,6 +88,30 @@ def load_static_data(config):
         static_mask_np = mask_da.values.astype(np.float32)
         if len(static_mask_np.shape) == 2:
             static_mask_np = np.expand_dims(static_mask_np, axis=0).repeat(config.data_shape[0], axis=0)
+        # --- Correct 3D Mask Generation using Bathymetry ---
+        # Check if the loaded mask is 2D (a surface mask).
+        if len(mask_da.shape) == 2:
+            print("Generating 3D mask from 2D surface mask and ocean depth...")
+            if not config.filepath_z_static or not os.path.exists(config.filepath_z_static):
+                raise FileNotFoundError(f"filepath_z_static is not defined or file not found. Please point it to your z-levels file (e.g., z25.nc).")
+
+            # Load the vertical grid coordinates (depth of each layer center).
+            with xr.open_dataset(config.filepath_z_static) as z_ds:
+                z_levels = z_ds['z'].isel(z=slice(config.depth_range[0], config.depth_range[1])).values
+            
+            # Load the ocean depth (bathymetry) data.
+            depth_ocean = static_ds['depth_ocean'].isel(
+                lat=slice(config.lat_range[0], config.lat_range[1]),
+                lon=slice(config.lon_range[0], config.lon_range[1])
+            ).values
+
+            # Create the 3D mask by comparing layer depth to ocean depth.
+            # A cell is 'ocean' (1) if its depth is less than the seafloor depth.
+            static_mask_np = (z_levels[:, np.newaxis, np.newaxis] < depth_ocean[np.newaxis, :, :]).astype(np.float32) * mask_da.values
+        else:
+            # If the mask is already 3D, use it directly.
+            print("Using pre-existing 3D mask from file.")
+            static_mask_np = mask_da.values.astype(np.float32)
 
         land_mask_tensor = torch.tensor(static_mask_np[np.newaxis, np.newaxis, :, :, :], dtype=torch.float32)
         
@@ -123,9 +151,11 @@ def load_static_data(config):
                 lat_rad = np.deg2rad(lat_grid)
                 coriolis_f = 2 * omega * np.sin(lat_rad)
                 location_channels.append((coriolis_f / (2 * omega)).astype(np.float32))
-            if "ocean_depth" in config.location_embedding_types:
-                depth = static_ds['depth_ocean'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
-                normalized_depth = (depth / 6000.0).astype(np.float32)
+            if "depth_ocean" in config.location_embedding_types:
+                depth_ocean_data = static_ds['depth_ocean'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
+                # Replace NaNs (representing land) with 0 before normalization
+                np.nan_to_num(depth_ocean_data, copy=False, nan=0.0)
+                normalized_depth = (depth_ocean_data / 6000.0).astype(np.float32)
                 location_channels.append(normalized_depth)
             
             if location_channels:
@@ -145,15 +175,14 @@ def load_test_ocean_slice(config, year, day_of_year):
 
     def _load_and_process_slice(filepaths, varname, target_time, min_val, max_val):
         with xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True, chunks={'time': 1}) as ds:
-            if not (config.varname_lat=='lat' and config.varname_lon=='lon'):
-                ds = ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
+            if config.varname_lat and config.varname_lat != 'lat':
+                ds = ds.rename({config.varname_lat:'lat'})
+            if config.varname_lon and config.varname_lon != 'lon':
+                ds = ds.rename({config.varname_lon:'lon'})
             calendar = ds.time.encoding.get('calendar', 'standard')
             target_cftime = cftime.datetime(target_time.year, target_time.month, target_time.day, calendar=calendar)
-            time_diffs = np.abs(ds.time - target_cftime)
-            nearest_time_index = time_diffs.argmin().item()
             
-            da_sliced = ds[varname].isel(
-                time=nearest_time_index,
+            da_sliced = ds[varname].sel(time=target_cftime, method='nearest').isel(
                 z=slice(config.depth_range[0], config.depth_range[1]),
                 lat=slice(config.lat_range[0], config.lat_range[1]),
                 lon=slice(config.lon_range[0], config.lon_range[1])

@@ -35,16 +35,13 @@ def weighted_mse_loss(pred, target, weight, mask):
     return weighted_squared_error.sum() / sum_of_weights
 
 # --- Training Function ---
-def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config, initial_train_losses=None, initial_val_losses=None):
+def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config, train_losses, val_losses):
     """
     Trains the 3D diffusion U-Net model with memory optimization techniques.
     """
     model.train()
     if accelerator.is_main_process:
         print("Starting training...")
-    
-    train_losses = initial_train_losses if initial_train_losses is not None else []
-    val_losses = initial_val_losses if initial_val_losses is not None else []
     
     if accelerator.is_main_process:
         os.makedirs(config.model_checkpoint_dir, exist_ok=True)
@@ -70,7 +67,6 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                                           location_field=loc_field_input)
 
                 loss = weighted_mse_loss(predicted_epsilon, true_epsilon, area_weights_batch, land_mask_batch)
-                
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:

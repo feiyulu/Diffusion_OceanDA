@@ -194,7 +194,7 @@ class Config:
         
         self.location_embedding_channels = 0
         if self.location_embedding_types:
-            type_counts = {"lat": 1, "lon": 1, "lon_cyclical": 2, "cos_lat": 1, "coriolis": 1, "ocean_depth": 1, "grid_area": 1}
+            type_counts = {"lat": 1, "lon": 1, "lon_cyclical": 2, "cos_lat": 1, "coriolis": 1, "depth_ocean": 1, "grid_area": 1}
             for emb_type in self.location_embedding_types:
                 self.location_embedding_channels += type_counts.get(emb_type, 0)
  

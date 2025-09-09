@@ -119,20 +119,14 @@ if __name__ == "__main__":
     start_epoch, train_losses, val_losses = 0, [], []
     latest_checkpoint_dir = None
     if os.path.exists(config.model_checkpoint_dir):
-        epoch_dirs = [d for d in os.listdir(config.model_checkpoint_dir) if d.startswith("epoch_")]
+        epoch_dirs = sorted([d for d in os.listdir(config.model_checkpoint_dir) if d.startswith("epoch_") and os.path.isdir(os.path.join(config.model_checkpoint_dir, d))], 
+                            key=lambda x: int(re.search(r'epoch_(\d+)', x).group(1)), reverse=True)
         if epoch_dirs:
-            latest_epoch = -1
-            for dir_name in epoch_dirs:
-                try:
-                    epoch_num = int(re.search(r'epoch_(\d+)', dir_name).group(1))
-                    if epoch_num > latest_epoch:
-                        checkpoint_path = os.path.join(config.model_checkpoint_dir, dir_name)
-                        if os.path.exists(os.path.join(checkpoint_path, "pytorch_model.bin")) or \
-                           os.path.exists(os.path.join(checkpoint_path, "model.safetensors")):
-                            latest_epoch = epoch_num
-                            latest_checkpoint_dir = checkpoint_path
-                except (AttributeError, ValueError):
-                    continue
+            latest_checkpoint_dir = os.path.join(config.model_checkpoint_dir, epoch_dirs[0])
+            # Verify the checkpoint is valid before proceeding
+            if not (os.path.exists(os.path.join(latest_checkpoint_dir, "pytorch_model.bin")) or \
+                    os.path.exists(os.path.join(latest_checkpoint_dir, "model.safetensors"))):
+                latest_checkpoint_dir = None
 
     if latest_checkpoint_dir:
         print(f"Resuming training from checkpoint: {latest_checkpoint_dir}...")
@@ -152,7 +146,7 @@ if __name__ == "__main__":
     config.start_epoch = start_epoch
     
     train_losses, val_losses = train_diffusion_model(
-        accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config
+        accelerator, model, train_loader, val_loader, diffusion, optimizer, scheduler, config, train_losses, val_losses
     )
 
     if config.save_model_after_training and accelerator.is_main_process:

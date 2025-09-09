@@ -6,6 +6,17 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch.utils.checkpoint import checkpoint 
 
+# --- Toggle for diagnostics ---
+ENABLE_DIAGNOSTICS = True
+
+# --- NEW: Diagnostic Helper Function ---
+def _check_tensor(tensor, name, should_log=False):
+    """Helper function to print tensor diagnostics."""
+    if not should_log: return
+    if torch.is_tensor(tensor):
+        print(f"  - DIAGNOSTIC ({name}): shape={tensor.shape}")
+    else:
+        print(f"  - DIAGNOSTIC ({name}): Not a tensor")
 # --- 2D Convolutional Layers (for the main U-Net) ---
 
 class PartialConv2d(nn.Conv2d):
@@ -29,6 +40,7 @@ class PartialConv2d(nn.Conv2d):
         corrected_output = output * mask_ratio
         final_output = corrected_output * mask_out
         final_mask = mask_out.repeat(1, self.out_channels, 1, 1)
+
         return final_output, final_mask
 
 # --- 1D Convolutional Layers (for Vertical Encoder/Decoder) ---
@@ -39,6 +51,7 @@ class PartialConv1d(nn.Conv1d):
         self.register_buffer('sum_kernel', torch.ones(1, 1, self.kernel_size[0]))
         self.sum_kernel.requires_grad = False
         self.window_size = self.kernel_size[0]
+
     def forward(self, input_tensor, mask_in):
         masked_input = input_tensor * mask_in
         output = super().forward(masked_input)
@@ -53,6 +66,7 @@ class PartialConv1d(nn.Conv1d):
         corrected_output = output * mask_ratio
         final_output = corrected_output * mask_out
         final_mask = mask_out.repeat(1, self.out_channels, 1)
+
         return final_output, final_mask
 
 # --- Positional Embedding ---
@@ -83,7 +97,7 @@ class VerticalEncoder(nn.Module):
         x_reshaped = rearrange(x, 'n c d h w -> (n h w) c d')
         mask_reshaped = rearrange(mask, 'n c d h w -> (n h w) c d')[:, :1, :]
         
-        x_conv, mask_conv = self.conv_in(x_reshaped, mask_reshaped)
+        x_conv, mask_conv = self.conv_in(x_reshaped, mask_reshaped) # PartialConv1d
         x_act = self.act(x_conv)
         x_act = x_act * mask_conv
 
@@ -111,11 +125,8 @@ class VerticalDecoder(nn.Module):
         x_fc = self.fc(x_reshaped)
         x_unflat = rearrange(x_fc, 'b (ld d) -> b ld d', d=self.depth_size, ld=self.latent_dim)
         x_act = self.act(x_unflat)
-
-        mask_reshaped = rearrange(original_mask_3d_group, 'n c d h w -> (n h w) c d')[:, :1, :]
-        
-        # BUG FIX: Use the mask propagated by the PartialConv1d layer itself.
-        x_decoded, mask_decoded_1d = self.conv_out(x_act, mask_reshaped)
+        mask_reshaped_1d = rearrange(original_mask_3d_group, 'n c d h w -> (n h w) c d')[:, :1, :]
+        x_decoded, mask_decoded_1d = self.conv_out(x_act, mask_reshaped_1d) # PartialConv1d
         
         output = rearrange(x_decoded, '(n h w) c d -> n c d h w', n=n, h=h, w=w)
         final_mask_5d = rearrange(mask_decoded_1d, '(n h w) c d -> n c d h w', n=n, h=h, w=w)
@@ -279,12 +290,13 @@ class UNet2D(nn.Module):
 
     def forward(self, x, time_emb, mask):
         is_main_process = not x.device.type == 'cuda' or x.device.index == 0
-        should_log = is_main_process and not UNet2D._has_logged_forward
+        should_log = ENABLE_DIAGNOSTICS and is_main_process and not UNet2D._has_logged_forward
 
-        if should_log: print("\n--- 2D U-Net Core Forward Pass ---")
+        if should_log:
+            print("\n--- 2D U-Net Core Forward Pass ---")
+            _check_tensor(x, "UNet2D Input", should_log)
         
         h, current_mask = self.initial_conv(x, mask)
-        if should_log: print(f"After Initial 2D Conv: {h.shape}")
         
         skip_connections = []
         for i, stage in enumerate(self.down_stages):
@@ -311,6 +323,7 @@ class UNet2D(nn.Module):
             
         final_output = self.final_conv(h)
         if should_log:
+            _check_tensor(final_output, "UNet2D Final Output", should_log)
             print(f"After Final 2D Conv: {final_output.shape}")
             print("------------------------------------")
             UNet2D._has_logged_forward = True
@@ -358,16 +371,17 @@ class UNet(nn.Module):
         
     def forward(self, x, t, mask, conditions=None, location_field=None):
         is_main_process = not x.device.type == 'cuda' or x.device.index == 0
-        should_log = is_main_process and not UNet._has_logged_forward
+        should_log = ENABLE_DIAGNOSTICS and is_main_process and not UNet._has_logged_forward
 
         if should_log:
             print("\n--- UNet Wrapper Forward Pass ---")
             print(f"Initial Input 'x': {x.shape}")
+            _check_tensor(x, "Wrapper Input x", should_log)
 
         latent_repr_list = []
         horizontal_mask_list = []
         for i, group in enumerate(self.encoder_groups):
-            x_group = x[:, group, :, :, :]
+            x_group = x[:, group, :, :, :].clone() # Use clone to avoid in-place modification issues
             mask_group = mask[:, group, :, :, :]
             
             latent_repr, horizontal_mask = self.vertical_encoders[i](x_group, mask_group)
@@ -378,11 +392,12 @@ class UNet(nn.Module):
         concatenated_latent_repr = torch.cat(latent_repr_list, dim=1)
         representative_horizontal_mask = horizontal_mask_list[0]
         if should_log: print(f"Concatenated Latent Repr: {concatenated_latent_repr.shape}")
+        if should_log: _check_tensor(concatenated_latent_repr, "Concatenated Latent", should_log)
 
         if self.config.location_embedding_channels > 0 and location_field is not None:
             concatenated_latent_repr = torch.cat([concatenated_latent_repr, location_field], dim=1)
             location_mask = torch.ones_like(location_field)
-            unet_input_mask = torch.cat([representative_horizontal_mask.repeat(1, sum(self.latent_dims), 1, 1), location_mask], dim=1)
+            unet_input_mask = torch.cat([representative_horizontal_mask.repeat(1, sum(self.latent_dims), 1, 1), location_mask * representative_horizontal_mask], dim=1)
             if should_log: print(f"After Location Concat: {concatenated_latent_repr.shape}")
         else:
             unet_input_mask = representative_horizontal_mask.repeat(1, sum(self.latent_dims), 1, 1)
@@ -390,6 +405,7 @@ class UNet(nn.Module):
         time_emb = self.time_mlp(t)
 
         unet_output = self.unet_2d(concatenated_latent_repr, time_emb, unet_input_mask)
+        if should_log: _check_tensor(unet_output, "Main UNet2D Output", should_log)
         
         output_list = torch.zeros_like(x)
         
@@ -408,6 +424,7 @@ class UNet(nn.Module):
         
         if should_log:
             print(f"Final Reconstructed Output: {output_list.shape}")
+            _check_tensor(output_list, "Final Wrapper Output", should_log)
             print("---------------------------------")
             UNet._has_logged_forward = True
 

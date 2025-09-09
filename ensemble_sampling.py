@@ -42,22 +42,21 @@ if __name__ == "__main__":
     state_dict = None
     checkpoint_dir = config.model_checkpoint_dir
     if os.path.exists(checkpoint_dir):
-        all_checkpoints = [os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir)]
-        all_checkpoints.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        for checkpoint_path in all_checkpoints:
-            try:
-                if checkpoint_path.endswith('.pth'):
-                    checkpoint_data = torch.load(checkpoint_path, map_location=config.device)
-                    state_dict = checkpoint_data['model_state_dict']
-                    break
-                elif os.path.isdir(checkpoint_path) and os.path.basename(checkpoint_path).startswith('epoch_'):
-                    model_file = os.path.join(checkpoint_path, "pytorch_model.bin")
-                    if os.path.exists(model_file):
-                        state_dict = torch.load(model_file, map_location=config.device)
-                        break
-            except Exception as e:
-                print(f"Warning: Could not load checkpoint {os.path.basename(checkpoint_path)}. Error: {e}")
-                continue
+        # Find the latest checkpoint directory or .pth file
+        all_checkpoints = [os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir) if f.startswith('epoch_') or f.endswith('.pth')]
+        if not all_checkpoints:
+            raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
+
+        latest_checkpoint = max(all_checkpoints, key=os.path.getmtime)
+        print(f"Loading latest checkpoint: {latest_checkpoint}")
+        if latest_checkpoint.endswith('.pth'):
+            checkpoint_data = torch.load(latest_checkpoint, map_location=config.device)
+            state_dict = checkpoint_data.get('model_state_dict', checkpoint_data)
+        elif os.path.isdir(latest_checkpoint):
+            model_file = os.path.join(latest_checkpoint, "pytorch_model.bin")
+            if os.path.exists(model_file):
+                state_dict = torch.load(model_file, map_location=config.device)
+
     if state_dict is None: raise FileNotFoundError(f"No valid model checkpoint found in {checkpoint_dir}.")
     model.load_state_dict(state_dict)
     print("Model loaded successfully.")
