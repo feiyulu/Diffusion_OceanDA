@@ -97,17 +97,39 @@ class Config:
                 "type": "synthetic_profiles",
                 "enabled": True,
                 "num_profiles": 100,
-                "guidance_strength": 1.0,
-                "operator": "point_replacement"
+                "guidance_strength": 0.8, # Overall strength of the correction
+                "operator": "localized_innovation", # 'point_replacement', 'localized_innovation', or 'latent_blending'
+                "localization_radius": 4 # Radius of influence in grid cells
+            },
+            {
+                "name": "real_argo",
+                "type": "real_argo",
+                "enabled": False, # Disabled by default
+                "filepath_template": "/scratch/cimes/feiyul/Ocean_Data/obs_data/argo/argo_{year}_interp25.nc",
+                "time_window_days": 1,
+                "guidance_strength": 0.8,
+                "operator": "localized_innovation",
+                "localization_radius": 4
+            },
+            {
+                "name": "real_sst",
+                "type": "real_sst",
+                "enabled": False, # Disabled by default
+                "filepath_template": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.{year}.regridded.nc",
+                "target_channel": 0,
+                "guidance_strength": 0.5,
+                "operator": "localized_innovation",
+                "localization_radius": 2
             },
             {
                 "name": "synthetic_sst",
                 "type": "synthetic_surface",
-                "enabled": False, # Disabled by default
+                "enabled": True, # Disabled by default
                 "target_channel": 0, # e.g., Temperature
                 "guidance_strength": 0.5,
-                "operator": "point_replacement",
-                "subsample_fraction": 0.05 # Use only 5% of SST data for guidance
+                "operator": "localized_innovation",
+                "subsample_fraction": 0.05, # Use only 5% of SST data for guidance
+                "localization_radius": 2
             }
         ],
 

@@ -127,13 +127,13 @@ class argo:
 
             i += 1
 
-        # Pre-calculate summary statistics for faster filtering
-        self.min_depth = np.array([p.min_depth for p in self.profiles])
-        self.max_depth = np.array([p.max_depth for p in self.profiles])
-        self.levels = np.array([p.levels for p in self.profiles])
+        # Pre-calculate summary statistics and metadata arrays
         self.lat = np.array([p.lat for p in self.profiles])
         self.lon = np.array([p.lon for p in self.profiles])
         self.time = np.array([p.time for p in self.profiles])
+        self.min_depth = np.array([p.min_depth for p in self.profiles])
+        self.max_depth = np.array([p.max_depth for p in self.profiles])
+        self.levels = np.array([p.levels for p in self.profiles])
 
     def convert_interpolated_to_dataset(self) -> xr.Dataset:
         """Converts the collection of interpolated profiles into a single xarray Dataset."""

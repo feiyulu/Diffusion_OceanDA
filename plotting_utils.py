@@ -24,6 +24,47 @@ def plot_losses(train_losses, val_losses, save_path):
     plt.close()
     print(f"Loss plot saved to {save_path}")
 
+def plot_loaded_observations(observed_mask_np, land_mask_np, config, sample_day_datetime, num_obs_points):
+    """
+    Visualizes the locations of loaded observations on a map for verification.
+    """
+    print("\nVisualizing loaded observation locations...")
+    
+    # Find which depth levels have observations
+    depths_with_obs = np.where(np.any(observed_mask_np, axis=(0, 2, 3)))[0]
+    if len(depths_with_obs) == 0:
+        print("No observations found to plot.")
+        return
+
+    # Plot only a subset of depth levels if there are too many
+    plot_depths = depths_with_obs
+    if len(depths_with_obs) > 5:
+        plot_depths = depths_with_obs[::len(depths_with_obs)//5]
+        print(f"Plotting a subset of depth levels with observations: {plot_depths}")
+
+    for depth_idx in plot_depths:
+        fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+        
+        # Plot land as a background
+        ax.imshow(land_mask_np == 0, cmap='Greys', origin='lower', alpha=0.5)
+        
+        # Plot ocean
+        ocean_mask = np.ma.masked_where(land_mask_np == 0, np.ones_like(land_mask_np))
+        ax.imshow(ocean_mask, cmap='Blues', origin='lower', alpha=0.3)
+
+        # Overlay observation points for this depth level
+        obs_y, obs_x = np.where(np.any(observed_mask_np[:, depth_idx, :, :], axis=0))
+        ax.scatter(obs_x, obs_y, c='red', marker='x', s=5, label=f'Obs Points ({len(obs_y)})')
+
+        ax.set_title(f'Loaded Observation Locations for {sample_day_datetime.strftime("%Y-%m-%d")} at Depth Index {depth_idx}')
+        ax.legend()
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+        plot_save_path = os.path.join(config.sample_plot_dir, f"obs_locations_day{sample_day_datetime.dayofyear}_depth{depth_idx}.png")
+        plt.savefig(plot_save_path, dpi=150)
+        print(f"Observation location plot saved to {plot_save_path}")
+        plt.close(fig)
 
 def plot_ensemble_results_3d(
     ensemble_mean, ensemble_spread, true_sample, clim_pred,

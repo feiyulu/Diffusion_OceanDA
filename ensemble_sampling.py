@@ -11,12 +11,12 @@ import re
 import pickle
 
 from config import Config
-from data_utils import load_static_data, load_test_ocean_slice
+from data_utils import load_static_data, load_test_ocean_slice, load_real_observations
 from unet_model import UNet
 from diffusion_process import Diffusion
 from sampling_utils import sample_conditional
 from observation_utils import create_observation_tensors
-from plotting_utils import plot_ensemble_results_3d
+from plotting_utils import plot_ensemble_results_3d, plot_loaded_observations
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ensemble sampling for Ocean Diffusion Model.")
@@ -89,11 +89,29 @@ if __name__ == "__main__":
             clim_pred = (clim_da - config.T_range[0]) / (config.T_range[1]-config.T_range[0])
 
 
-            # --- Generate observations using the flexible dispatcher ---
-            observations, observed_mask, guidance_strength = create_observation_tensors(
-                config, sample_day_str, true_sample, land_mask
-            )
-            num_obs_points = torch.sum(observed_mask).item()
+            # --- Load or Generate Observations based on Config ---
+            use_real_obs = any(s.get("enabled", False) and s.get("type", "").startswith("real") for s in config.observation_sources)
+
+            if use_real_obs:
+                print("Loading real observations...")
+                observations, observed_mask, guidance_strength = load_real_observations(
+                    config, sample_day_str
+                )
+                num_obs_points = torch.sum(observed_mask).item()
+                print(f"Loaded {num_obs_points} real observation points.")
+
+                # --- Visualize the loaded observations for verification ---
+                if num_obs_points > 0:
+                    observed_mask_np = observed_mask.squeeze(0).cpu().numpy()
+                    land_mask_np_2d = land_mask[0, 0, 0].cpu().numpy() # Use a 2D slice for plotting
+                    plot_loaded_observations(observed_mask_np, land_mask_np_2d, config, sample_day_str, num_obs_points)
+
+            else:
+                print("Generating synthetic observations...")
+                observations, observed_mask, guidance_strength = create_observation_tensors(
+                    config, sample_day_str, true_sample, land_mask
+                )
+                num_obs_points = torch.sum(observed_mask).item()
 
             print(f"Generating ensemble of size {config.ensemble_size}...")
             ensemble_members = []

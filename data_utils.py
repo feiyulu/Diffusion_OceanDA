@@ -7,6 +7,8 @@ import pandas as pd
 import datetime
 import cftime
 import os.path
+from scipy.spatial import cKDTree
+
 
 def get_time_coordinates(config):
     """
@@ -68,6 +70,119 @@ def load_single_ocean_slice(config, time_coord):
                 conditional_data['co2'] = torch.tensor(co2_normalized, dtype=torch.float32)
 
     return data_tensor, conditional_data
+
+def load_real_observations(config, target_time_pd):
+    """
+    Loads real observations (e.g., SST, Argo) for a specific time,
+    projects them onto the model grid, and returns them as tensors.
+
+    Args:
+        config (Config): The experiment configuration.
+        target_time_pd (pd.Timestamp): The timestamp for which to load observations.
+
+    Returns:
+        A tuple of tensors: (observations, observed_mask, guidance_strength_mask)
+    """
+    print(f"Loading real observations for {target_time_pd.strftime('%Y-%m-%d')}...")
+    C, D, H, W = config.channels, *config.data_shape
+
+    # Initialize empty tensors
+    observations = torch.zeros((1, C, D, H, W))
+    observed_mask = torch.zeros((1, C, D, H, W), dtype=torch.bool)
+    guidance_strength_mask = torch.zeros((1, C, D, H, W))
+
+    # --- Grid setup for projection ---
+    # Use a KD-tree for fast nearest-neighbor lookup of sparse observations.
+    with xr.open_dataset(config.filepath_static) as static_ds:
+        if not (config.varname_lat=='lat' and config.varname_lon=='lon'):
+            static_ds = static_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
+        
+        model_lat_2d = static_ds['geolat'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
+        model_lon_2d = static_ds['geolon'].isel(lat=slice(config.lat_range[0], config.lat_range[1]), lon=slice(config.lon_range[0], config.lon_range[1])).values
+
+    grid_points = np.vstack([model_lat_2d.ravel(), model_lon_2d.ravel()]).T
+    kdtree = cKDTree(grid_points)
+
+    def find_nearest_grid_cell(obs_lat, obs_lon):
+        """Finds the nearest model grid cell (y, x) indices for a given lat/lon."""
+        # Ensure longitude is in the model grid's range (e.g., 0-360)
+        obs_lon = obs_lon % 360 if np.min(model_lon_2d) >= 0 else obs_lon
+        _dist, idx = kdtree.query([obs_lat, obs_lon], k=1)
+        return np.unravel_index(idx, model_lat_2d.shape)
+
+    # --- Loop through observation sources ---
+    for source in config.observation_sources:
+        if not source.get("enabled", False):
+            continue
+
+        source_type = source.get("type")
+        guidance_strength = source.get("guidance_strength", 1.0)
+
+        if source_type == "real_sst":
+            print(f"  - Processing source: {source['name']} (SST)")
+            try:
+                sst_filepath = source["filepath_template"].format(year=target_time_pd.year)
+                with xr.open_dataset(sst_filepath) as ds:
+                    calendar = ds.time.encoding.get('calendar', 'standard')
+                    target_cftime = cftime.datetime(target_time_pd.year, target_time_pd.month, target_time_pd.day, calendar=calendar)
+                    
+                    sst_da = ds['sst'].sel(time=target_cftime, method='nearest').load()
+                    
+                    # The SST data has been pre-regridded to the model grid.
+                    # We just need to slice it to match the experiment's domain.
+                    sst_da_sliced = sst_da.isel(
+                        lat=slice(config.lat_range[0], config.lat_range[1]),
+                        lon=slice(config.lon_range[0], config.lon_range[1])
+                    )
+                    sst_np = sst_da.values.astype(np.float32)
+                    valid_mask = (sst_np > -1e30)
+                    
+                    sst_normalized = (sst_np[valid_mask] - config.T_range[0]) / (config.T_range[1] - config.T_range[0])
+                    
+                    channel_idx = source.get("target_channel", 0)
+                    depth_idx = 0  # SST is at the surface
+                    
+                    observations[0, channel_idx, depth_idx, :, :][valid_mask] = torch.from_numpy(sst_normalized)
+                    observed_mask[0, channel_idx, depth_idx, :, :][valid_mask] = True
+                    guidance_strength_mask[0, channel_idx, depth_idx, :, :][valid_mask] = guidance_strength
+                    print(f"    ...found {np.sum(valid_mask)} valid SST observations on the regridded file.")
+
+            except Exception as e:
+                print(f"    ...could not process SST source {source['name']}. Error: {e}")
+
+        elif source_type == "real_argo":
+            print(f"  - Processing source: {source['name']} (Argo)")
+            try:
+                argo_filepath = source["filepath_template"].format(year=target_time_pd.year)
+                with xr.open_dataset(argo_filepath) as argo_ds:
+                    time_window_days = source.get("time_window_days", 1)
+                    start_time = target_time_pd - pd.to_timedelta(time_window_days / 2, 'd')
+                    end_time = target_time_pd + pd.to_timedelta(time_window_days / 2, 'd')
+                    
+                    time_mask = (argo_ds['time'].values >= np.datetime64(start_time)) & (argo_ds['time'].values <= np.datetime64(end_time))
+                    profiles_in_window = argo_ds.isel(profile=time_mask)
+                    print(f"    ...found {len(profiles_in_window['profile'])} Argo profiles in time window.")
+
+                    for i in range(len(profiles_in_window['profile'])):
+                        profile = profiles_in_window.isel(profile=i)
+                        lat_idx, lon_idx = find_nearest_grid_cell(profile['lat'].item(), profile['lon'].item())
+                        
+                        # Temperature
+                        T_profile = profile['T'].values
+                        valid_T = ~np.isnan(T_profile)
+                        if np.any(valid_T):
+                            norm_T = (T_profile[valid_T] - config.T_range[0]) / (config.T_range[1] - config.T_range[0])
+                            depth_indices = np.arange(len(T_profile))[valid_T]
+                            
+                            safe_mask = depth_indices < D
+                            if np.any(safe_mask):
+                                observations[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = torch.from_numpy(norm_T[safe_mask])
+                                observed_mask[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = True
+                                guidance_strength_mask[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = guidance_strength
+            except Exception as e:
+                print(f"    ...could not process Argo source {source['name']}. Error: {e}")
+
+    return observations, observed_mask, guidance_strength_mask
 
 def load_static_data(config):
     """

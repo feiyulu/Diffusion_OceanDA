@@ -39,7 +39,7 @@ print(f"Target Argo interpolation grid defined with {len(model_z_argo)} levels u
 # Loop through the specified years to process the raw Argo data files.
 # The loop runs in reverse chronological order.
 print("\nStarting to process raw Argo data files...")
-for year in range(2024, 2002, -1):
+for year in range(2023, 2002, -1):
     print(f"--- Processing year: {year} ---")
     
     # Construct the path to the raw Argo data file for the current year.
@@ -62,6 +62,7 @@ for year in range(2024, 2002, -1):
 
         # Convert the processed list of profile objects into a clean xarray Dataset.
         ds_processed = argo_obs_interp.convert_interpolated_to_dataset()
+        print(ds_processed)
 
         # Define the output path for the new, processed NetCDF file.
         output_path = f'{data_dir}/obs_data/argo/argo_{year}_interp{len(combine_levels)-1}.nc'
