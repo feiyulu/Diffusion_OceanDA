@@ -19,6 +19,8 @@ def _check_tensor(tensor, name, should_log=False):
         print(f"  - DIAGNOSTIC ({name}): Not a tensor")
 # --- 2D Convolutional Layers (for the main U-Net) ---
 
+# A custom 2D convolution layer that correctly handles masked or missing data.
+# It adjusts the output based on the proportion of valid data in the kernel window.
 class PartialConv2d(nn.Conv2d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -45,6 +47,7 @@ class PartialConv2d(nn.Conv2d):
 
 # --- 1D Convolutional Layers (for Vertical Encoder/Decoder) ---
 
+# A custom 1D convolution layer, analogous to PartialConv2d, for operating on the vertical dimension.
 class PartialConv1d(nn.Conv1d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -71,6 +74,7 @@ class PartialConv1d(nn.Conv1d):
 
 # --- Positional Embedding ---
 
+# Creates sinusoidal embeddings for the diffusion timestep, allowing the model to be conditioned on time.
 class SinusoidalPositionalEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -84,6 +88,9 @@ class SinusoidalPositionalEmbedding(nn.Module):
 
 # --- NEW: Vertical Encoder and Decoder Modules ---
 
+# This module implements the first stage of the factorized U-Net.
+# It takes a group of 3D physical variables (e.g., Temperature) and encodes their
+# vertical structure into a 2D latent representation.
 class VerticalEncoder(nn.Module):
     """Encodes the vertical dimension of a GROUP of channels into a latent feature space."""
     def __init__(self, in_channels, latent_dim, depth_size):
@@ -108,6 +115,9 @@ class VerticalEncoder(nn.Module):
         horizontal_mask = (torch.sum(mask, dim=(1,2)) > 0).float().unsqueeze(1)
         return output, horizontal_mask
 
+# This module implements the final stage of the factorized U-Net.
+# It takes a 2D latent representation from the main U-Net and decodes it back
+# into the 3D physical space for a specific group of variables.
 class VerticalDecoder(nn.Module):
     """Decodes from a latent space back to the physical vertical dimension for a GROUP of channels."""
     def __init__(self, latent_dim, out_channels, depth_size):
@@ -135,6 +145,7 @@ class VerticalDecoder(nn.Module):
 
 # --- Core 2D U-Net Components ---
 
+# A standard residual block for the 2D U-Net, incorporating partial convolutions.
 class ResidualBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, time_embedding_dim, dropout_prob):
         super().__init__()
@@ -161,6 +172,7 @@ class ResidualBlock2D(nn.Module):
         combined_mask = h_mask * residual_mask
         return (h + residual) * combined_mask, combined_mask
 
+# A standard self-attention block for the 2D U-Net to capture long-range spatial dependencies.
 class SelfAttentionBlock2D(nn.Module):
     def __init__(self, channels, num_heads=4):
         super().__init__()
@@ -183,6 +195,7 @@ class SelfAttentionBlock2D(nn.Module):
         out = self.proj_out(out)
         return (x + out) * mask, mask
 
+# A downsampling block in the 2D U-Net, containing residual blocks and optional attention.
 class DownBlock2D(nn.Module):
     def __init__(self, in_channels, out_channels, time_embedding_dim, dropout_prob, has_attn=False, num_res_blocks=2):
         super().__init__()
@@ -209,6 +222,7 @@ class DownBlock2D(nn.Module):
         x_down, mask_down = self.downsample(current_x, current_mask)
         return x_down, mask_down, skip_outputs
 
+# An upsampling block in the 2D U-Net, containing residual blocks and optional attention.
 class UpBlock2D(nn.Module):
     def __init__(self, in_channels, skip_channels_in, out_channels, time_embedding_dim, dropout_prob, has_attn=False, num_res_blocks=2):
         super().__init__()
@@ -245,6 +259,7 @@ class UpBlock2D(nn.Module):
             
         return current_x, current_mask
 
+# The core 2D U-Net that operates on the latent space representations.
 class UNet2D(nn.Module):
     _has_logged_forward = False
     
@@ -343,6 +358,11 @@ class UNet2D(nn.Module):
 
 # --- Main UNet Wrapper ---
 
+# The main model class that orchestrates the entire factorized U-Net architecture.
+# The forward pass follows this sequence:
+# 1. `encode_vertical`: 3D Physical Space -> 2D Latent Space
+# 2. `unet_2d`: Processes the 2D latent representation.
+# 3. `decode_vertical`: 2D Latent Space -> 3D Physical Space
 class UNet(nn.Module):
     _has_logged_forward = False
 

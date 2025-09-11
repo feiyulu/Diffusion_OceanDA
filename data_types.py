@@ -6,6 +6,7 @@ import xarray as xr
 import scipy.interpolate as interpolate
 from typing import List, Tuple, Optional
 
+# Represents a single vertical profile from an Argo float, containing its metadata and sensor readings.
 class argo_float:
     """Class to hold a single Argo float profile."""
     def __init__(self, time: np.datetime64, lat: float, lon: float, depth: np.ndarray, 
@@ -41,6 +42,8 @@ class argo_float:
         """Returns the number of depth levels in the profile."""
         return self.levels
 
+# Manages a collection of Argo float profiles, providing methods for loading from raw
+# NetCDF files, performing quality control, and interpolating to a standard vertical grid.
 class argo:
     """A collection of Argo float profiles, with methods for loading, filtering, and processing."""
     def __init__(
@@ -217,6 +220,7 @@ def depth_vertical_coarsen(model_dz: xr.DataArray, combine_levels: List[int]) ->
     model_dz_coarse = np.diff(model_zi_coarse)
     model_z_coarse = model_zi_coarse[:-1] + model_dz_coarse / 2
 
+    # Returns the new coarse layer thicknesses and the depths of their centers.
     return model_dz_coarse, model_z_coarse
 
 def variable_vertical_coarsen(

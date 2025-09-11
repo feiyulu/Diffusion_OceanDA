@@ -5,6 +5,9 @@ import json
 import os
 
 class Config:
+    """
+    A centralized configuration class for the ocean data assimilation project.
+    """
     def __init__(
         self,
         test_id,
@@ -28,6 +31,7 @@ class Config:
         area_weight_varname='area_t',
 
         # --- Data Slicing and Subsetting ---
+        # Specifies the spatial and temporal domain for experiments.
         depth_range=[0,25],
         lat_range=[26,154],
         lon_range=[120,248],
@@ -35,15 +39,18 @@ class Config:
         training_day_interval=1,
     
         # --- Normalization Ranges ---
+        # Defines the min/max values for normalizing physical data to the [0, 1] range.
         T_range=[-2,33],
         S_range=[32,37],
 
         # --- Core Diffusion Model Hyperparameters ---
+        # Controls the noise schedule for the diffusion process.
         timesteps=1000,
         beta_start=1e-5,
         beta_end=0.01,
 
         # --- U-Net Architecture ---
+        # Defines the structure of the neural network.
         architecture_style="factorized_2d",
         vertical_encoder_groups=[[0]], 
         vertical_latent_dims=[32], 
@@ -54,6 +61,7 @@ class Config:
         dropout_prob=0.1,
 
         # --- Training Parameters ---
+        # Controls the optimization process.
         epochs=100,
         batch_size=8,
         learning_rate=1e-4,
@@ -68,6 +76,7 @@ class Config:
         save_interval=10,
 
         # --- Experiment Tracking (Weights & Biases) ---
+        # Configuration for logging metrics and results with W&B.
         use_wandb=False,
         wandb_project="diffusion_ocean_da",
         wandb_entity="feiyulu-princeton",
@@ -84,6 +93,7 @@ class Config:
         location_embedding_types=["lon_cyclical", "cos_lat", "coriolis"],
 
         # --- Sampling Parameters ---
+        # Controls how new samples are generated from the trained model.
         sampling_method='ddpm',
         ensemble_size=1,
         sampling_batch_size=4,
@@ -91,6 +101,8 @@ class Config:
         ddim_eta=0.0,
         
         # --- Observation Settings ---
+        # This list defines all possible observation sources (real or synthetic) that can be
+        # used for conditional sampling (data assimilation).
         observation_sources=[
             {
                 "name": "synthetic_argo",
@@ -134,6 +146,7 @@ class Config:
         ],
 
         # --- Evaluation Settings ---
+        # Defines which days to run sampling on and which depth levels to plot.
         sample_years=[2024,2025],
         sample_days=[[0]],
         generate_training_animation=False,

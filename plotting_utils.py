@@ -69,8 +69,8 @@ def plot_loaded_observations(observed_mask_np, land_mask_np, config, sample_day_
 def plot_ensemble_results_3d(
     ensemble_mean, ensemble_spread, true_sample, clim_pred,
     observed_mask_np,
-    land_mask_np, area_weights_np, config, sample_day_datetime,
-    num_obs_points, depth_level, depth, select_size=None):
+    land_mask_np, area_weights_np, config, sample_day_datetime, 
+    num_obs_points, obs_count_str, depth_level, depth, select_size=None):
     """
     Visualizes a specific depth level of the 3D ensemble sampling results,
     plotting observations directly from the provided mask.
@@ -109,12 +109,13 @@ def plot_ensemble_results_3d(
         channel_mask_for_level = observed_mask_np[c, depth_level, :, :]
         obs_y, obs_x = np.where(channel_mask_for_level)
         if len(obs_y) > 0:
-            title_str = f'Obs {len(obs_y)}'
+            title_obs_str = f'Obs {len(obs_y)}'
             if depth_level > 0:
                 ax.scatter(obs_x, obs_y, c='red', marker='x', s=1, label='Observations')
-
+        else:
+            title_obs_str = "No Obs"
         plt.colorbar(im, ax=ax, label=f'Normalized {var_name}')
-        ax.set_title(f'Ground Truth (Depth {depth_level}: {depth}, {title_str})')
+        ax.set_title(f'Ground Truth (Depth {depth_level}: {depth}, {title_obs_str})')
 
         # --- Row 2: Climatology ---
         ax = axes[1, 0]
@@ -168,8 +169,7 @@ def plot_ensemble_results_3d(
 
         plot_save_path = os.path.join(
             config.sample_plot_dir,
-            f"ensemble_ch{c}_obs{num_obs_points}_day{sample_day_datetime.dayofyear}_"
-            f"depth{depth_level}_ens{select_size or config.ensemble_size}_{config.sampling_method}.png"
+            f"ensemble_ch{c}_{obs_count_str}_day{sample_day_datetime.dayofyear}_depth{depth_level}_{config.sampling_method}.png"
         )
         plt.savefig(plot_save_path, dpi=150)
         print(f"Ensemble plot for depth {depth_level} saved to {plot_save_path}")

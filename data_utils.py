@@ -73,6 +73,8 @@ def load_single_ocean_slice(config, time_coord):
 
 def load_real_observations(config, target_time_pd):
     """
+    Loads and processes real-world observations for a specific day.
+    It handles different data sources like SST and Argo, projecting them onto the model's grid.
     Loads real observations (e.g., SST, Argo) for a specific time,
     projects them onto the model grid, and returns them as tensors.
 
@@ -85,11 +87,7 @@ def load_real_observations(config, target_time_pd):
     """
     print(f"Loading real observations for {target_time_pd.strftime('%Y-%m-%d')}...")
     C, D, H, W = config.channels, *config.data_shape
-
-    # Initialize empty tensors
-    observations = torch.zeros((1, C, D, H, W))
-    observed_mask = torch.zeros((1, C, D, H, W), dtype=torch.bool)
-    guidance_strength_mask = torch.zeros((1, C, D, H, W))
+    device = config.device
 
     # --- Grid setup for projection ---
     # Use a KD-tree for fast nearest-neighbor lookup of sparse observations.
@@ -104,11 +102,17 @@ def load_real_observations(config, target_time_pd):
     kdtree = cKDTree(grid_points)
 
     def find_nearest_grid_cell(obs_lat, obs_lon):
+        """A helper function to project a lat/lon point to the nearest model grid index."""
         """Finds the nearest model grid cell (y, x) indices for a given lat/lon."""
         # Ensure longitude is in the model grid's range (e.g., 0-360)
         obs_lon = obs_lon % 360 if np.min(model_lon_2d) >= 0 else obs_lon
         _dist, idx = kdtree.query([obs_lat, obs_lon], k=1)
         return np.unravel_index(idx, model_lat_2d.shape)
+
+    # Initialize empty tensors
+    observations = torch.zeros((1, C, D, H, W), device=device)
+    observed_mask = torch.zeros((1, C, D, H, W), dtype=torch.bool, device=device)
+    guidance_strength_mask = torch.zeros((1, C, D, H, W), device=device)
 
     # --- Loop through observation sources ---
     for source in config.observation_sources:
@@ -118,6 +122,7 @@ def load_real_observations(config, target_time_pd):
         source_type = source.get("type")
         guidance_strength = source.get("guidance_strength", 1.0)
 
+        # Handler for gridded sea-surface temperature data.
         if source_type == "real_sst":
             print(f"  - Processing source: {source['name']} (SST)")
             try:
@@ -125,24 +130,20 @@ def load_real_observations(config, target_time_pd):
                 with xr.open_dataset(sst_filepath) as ds:
                     calendar = ds.time.encoding.get('calendar', 'standard')
                     target_cftime = cftime.datetime(target_time_pd.year, target_time_pd.month, target_time_pd.day, calendar=calendar)
-                    
-                    sst_da = ds['sst'].sel(time=target_cftime, method='nearest').load()
-                    
-                    # The SST data has been pre-regridded to the model grid.
-                    # We just need to slice it to match the experiment's domain.
-                    sst_da_sliced = sst_da.isel(
+
+                    sst_da_sliced = ds['sst'].sel(time=target_cftime, method='nearest').isel(
                         lat=slice(config.lat_range[0], config.lat_range[1]),
                         lon=slice(config.lon_range[0], config.lon_range[1])
-                    )
-                    sst_np = sst_da.values.astype(np.float32)
+                    ).load()
+                    
+                    sst_np = sst_da_sliced.values
                     valid_mask = (sst_np > -1e30)
                     
                     sst_normalized = (sst_np[valid_mask] - config.T_range[0]) / (config.T_range[1] - config.T_range[0])
                     
                     channel_idx = source.get("target_channel", 0)
                     depth_idx = 0  # SST is at the surface
-                    
-                    observations[0, channel_idx, depth_idx, :, :][valid_mask] = torch.from_numpy(sst_normalized)
+                    observations[0, channel_idx, depth_idx, :, :][valid_mask] = torch.from_numpy(sst_normalized).to(device)
                     observed_mask[0, channel_idx, depth_idx, :, :][valid_mask] = True
                     guidance_strength_mask[0, channel_idx, depth_idx, :, :][valid_mask] = guidance_strength
                     print(f"    ...found {np.sum(valid_mask)} valid SST observations on the regridded file.")
@@ -150,6 +151,7 @@ def load_real_observations(config, target_time_pd):
             except Exception as e:
                 print(f"    ...could not process SST source {source['name']}. Error: {e}")
 
+        # Handler for sparse, vertical Argo profile data.
         elif source_type == "real_argo":
             print(f"  - Processing source: {source['name']} (Argo)")
             try:
@@ -176,7 +178,7 @@ def load_real_observations(config, target_time_pd):
                             
                             safe_mask = depth_indices < D
                             if np.any(safe_mask):
-                                observations[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = torch.from_numpy(norm_T[safe_mask])
+                                observations[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = torch.from_numpy(norm_T[safe_mask]).to(device)
                                 observed_mask[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = True
                                 guidance_strength_mask[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = guidance_strength
             except Exception as e:
@@ -186,6 +188,7 @@ def load_real_observations(config, target_time_pd):
 
 def load_static_data(config):
     """
+    Loads time-invariant data associated with the model grid.
     Loads static data: land mask, location embeddings, and area weights.
     """
     print("Loading static data (mask, location embeddings, area weights)...")
@@ -202,6 +205,7 @@ def load_static_data(config):
         
         static_mask_np = mask_da.values.astype(np.float32)
         if len(static_mask_np.shape) == 2:
+            # If the mask is 2D, it's a surface mask. We need to create a 3D mask.
             static_mask_np = np.expand_dims(static_mask_np, axis=0).repeat(config.data_shape[0], axis=0)
         # --- Correct 3D Mask Generation using Bathymetry ---
         # Check if the loaded mask is 2D (a surface mask).
@@ -231,6 +235,7 @@ def load_static_data(config):
         land_mask_tensor = torch.tensor(static_mask_np[np.newaxis, np.newaxis, :, :, :], dtype=torch.float32)
         
         # --- Load Area Weights for Loss Calculation ---
+        # These weights account for the varying size of grid cells in area-based metrics.
         area_weights_tensor = None
         if config.area_weight_varname:
             print(f"Loading area weights from variable: {config.area_weight_varname}")
@@ -247,6 +252,8 @@ def load_static_data(config):
             print(f"Area weights loaded with shape: {area_weights_tensor.shape}")
 
         location_field_tensor = None
+        # --- Generate Location Embeddings ---
+        # These provide the 2D U-Net with spatial context (e.g., latitude, longitude).
         if config.location_embedding_channels > 0:
             print(f"Generating location embeddings for: {config.location_embedding_types}")
             location_channels = []
@@ -282,6 +289,7 @@ def load_static_data(config):
 
 def load_test_ocean_slice(config, year, day_of_year):
     """
+    Loads a single day of data from the test set, used as the "ground truth" for sampling experiments.
     Loads a single time slice of test data.
     """
     target_time_pd = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(day_of_year, unit='d')

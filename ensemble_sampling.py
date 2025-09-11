@@ -19,6 +19,7 @@ from observation_utils import create_observation_tensors
 from plotting_utils import plot_ensemble_results_3d, plot_loaded_observations
 
 if __name__ == "__main__":
+    # --- 1. Setup and Configuration ---
     parser = argparse.ArgumentParser(description="Ensemble sampling for Ocean Diffusion Model.")
     parser.add_argument("--work_path", "-w", type=str, default=".", help="Working directory.")
     parser.add_argument("--config", "-c", type=str, default="config.json", help="Path to the JSON config file.")
@@ -65,6 +66,7 @@ if __name__ == "__main__":
     z_ds=xr.open_dataset(config.filepath_z_static)
     z_da=z_ds['z']
 
+    # --- 2. Load Static Data ---
     print("Loading static data for sampling...")
     land_mask, location_field, area_weights = load_static_data(config)
     land_mask = land_mask.to(config.device)
@@ -72,15 +74,17 @@ if __name__ == "__main__":
         location_field = location_field.to(config.device)
 
     for year in config.sample_years[:-1]:
+        # --- 3. Main Loop: Process each specified sample day ---
         for sample_day in config.sample_days:
-            sample_day_str = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(sample_day, unit='d')
-            print(f"\n--- Processing Sample Day: {sample_day_str.strftime('%Y-%m-%d')} ---")
+            sample_day_datetime = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(sample_day, unit='d')
+            print(f"\n--- Processing Sample Day: {sample_day_datetime.strftime('%Y-%m-%d')} ---")
 
+            # Load the ground truth data for this day to use for observation generation and verification.
             true_sample, true_conditions = load_test_ocean_slice(config, year, sample_day)
             true_sample = true_sample.to(config.device)
             target_location_field = location_field
 
-            clim_ds = xr.open_dataset(config.filepath_t_clim)
+            clim_ds = xr.open_dataset(config.filepath_t_clim, decode_times=False)
             if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
                 clim_ds = clim_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
             clim_da = clim_ds[config.varname_t].isel(
@@ -89,56 +93,76 @@ if __name__ == "__main__":
             clim_pred = (clim_da - config.T_range[0]) / (config.T_range[1]-config.T_range[0])
 
 
-            # --- Load or Generate Observations based on Config ---
+            # --- 4. Observation Handling ---
+            # Based on the config, load real observations or generate synthetic ones.
             use_real_obs = any(s.get("enabled", False) and s.get("type", "").startswith("real") for s in config.observation_sources)
 
             if use_real_obs:
                 print("Loading real observations...")
                 observations, observed_mask, guidance_strength = load_real_observations(
-                    config, sample_day_str
+                    config, sample_day_datetime
                 )
-                num_obs_points = torch.sum(observed_mask).item()
-                print(f"Loaded {num_obs_points} real observation points.")
-
-                # --- Visualize the loaded observations for verification ---
-                if num_obs_points > 0:
-                    observed_mask_np = observed_mask.squeeze(0).cpu().numpy()
-                    land_mask_np_2d = land_mask[0, 0, 0].cpu().numpy() # Use a 2D slice for plotting
-                    plot_loaded_observations(observed_mask_np, land_mask_np_2d, config, sample_day_str, num_obs_points)
+                print(f"Loaded {torch.sum(observed_mask).item()} real observation points.")
 
             else:
                 print("Generating synthetic observations...")
                 observations, observed_mask, guidance_strength = create_observation_tensors(
-                    config, sample_day_str, true_sample, land_mask
+                    config, sample_day_datetime, true_sample, land_mask
                 )
-                num_obs_points = torch.sum(observed_mask).item()
 
-            print(f"Generating ensemble of size {config.ensemble_size}...")
+            # Calculate the number of observations that will be used for guidance, for logging and plotting.
+            # --- Calculate the number of observation points that will actually be used ---
+            obs_counts = {}
+            total_used_obs_points = 0
+            for source in config.observation_sources:
+                if not source.get("enabled", False):
+                    continue
+                
+                # Create a mask specific to this source's strength to count its points
+                source_strength = source.get("guidance_strength", 1.0)
+                source_mask = (observed_mask.bool()) & (guidance_strength == source_strength)
+
+                source_type = source.get("type", "")
+                if "profiles" in source_type or "argo" in source_type:
+                    # For profile data, count the number of unique horizontal locations (profiles).
+                    # Project the 3D mask to a 2D horizontal plane.
+                    horizontal_profile_mask = torch.any(source_mask, dim=2).squeeze(0).squeeze(0)
+                    num_profiles = torch.sum(horizontal_profile_mask).item()
+                    obs_counts[source['name']] = num_profiles
+                    total_used_obs_points += num_profiles # Add profile count for consistency in total
+                else:
+                    # For gridded data (like SST), the number of points in the mask is the final count,
+                    # as subsampling was already handled during creation.
+                    used_points = torch.sum(source_mask).item()
+                    obs_counts[source['name']] = used_points
+                    total_used_obs_points += used_points
+            
+            obs_count_str = "_".join([f"{name}{count}" for name, count in obs_counts.items()])
+            print(f"Total observation points to be used for guidance: {total_used_obs_points} ({obs_count_str})")
+
+            # --- 5. Ensemble Generation ---
+            print(f"\nGenerating ensemble of size {config.ensemble_size}...")
             ensemble_members = []
             batch_size = config.sampling_batch_size
             num_generated = 0
-            
-            with tqdm(total=config.ensemble_size, desc="Generating ensemble members") as pbar:
-                while num_generated < config.ensemble_size:
-                    current_batch_size = min(batch_size, config.ensemble_size - num_generated)
-                    
-                    generated_batch = sample_conditional(
-                        model, diffusion, config,
-                        observations=observations.to(device), 
-                        observed_mask=observed_mask.to(device),
-                        guidance_strength_mask=guidance_strength.to(device),
-                        land_mask=land_mask,
-                        target_conditions=true_conditions,
-                        target_location_field=target_location_field,
-                        num_samples=current_batch_size
-                    )
-                    
-                    for i in range(generated_batch.shape[0]):
-                        ensemble_members.append(generated_batch[i].cpu())
-                    
-                    num_generated += current_batch_size
-                    pbar.update(current_batch_size)
 
+            while num_generated < config.ensemble_size:
+                current_batch_size = min(batch_size, config.ensemble_size - num_generated)
+                
+                generated_batch = sample_conditional(
+                    model, diffusion, config,
+                    observations=observations.to(device), 
+                    observed_mask=observed_mask.to(device),
+                    guidance_strength_mask=guidance_strength.to(device),
+                    land_mask=land_mask,
+                    target_conditions=true_conditions, target_location_field=target_location_field,
+                    num_samples=current_batch_size)
+                
+                for i in range(generated_batch.shape[0]):
+                    ensemble_members.append(generated_batch[i].cpu())
+                num_generated += current_batch_size
+
+            # --- 6. Analysis and Plotting ---
             if ensemble_members:
                 ensemble_tensor = torch.stack(ensemble_members)
                 ensemble_mean = torch.mean(ensemble_tensor, dim=0)
@@ -151,9 +175,9 @@ if __name__ == "__main__":
                 for depth_idx in config.plot_depth_levels:
                     plot_ensemble_results_3d(
                         ensemble_mean, ensemble_spread, true_sample.squeeze(0).cpu(), clim_pred, 
-                        observed_mask_np,
-                        land_mask[0, 0, depth_idx].cpu().numpy(),
-                        area_weights_np, config, sample_day_str, num_obs_points,
+                        observed_mask_np, land_mask[0, 0, depth_idx].cpu().numpy(), 
+                        area_weights_np, 
+                        config, sample_day_datetime, total_used_obs_points, obs_count_str,
                         depth_level=depth_idx, depth=z_da[depth_idx].values
                     )
             else:

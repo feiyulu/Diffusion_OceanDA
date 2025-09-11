@@ -4,7 +4,10 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
-
+import xarray as xr
+from collections import defaultdict
+from scipy.spatial import cKDTree
+ 
 from diffusion_process import Diffusion, DPMSolver
 
 def _create_gaussian_kernel(radius, sigma, device):
@@ -29,8 +32,10 @@ def _create_gaussian_kernel(radius, sigma, device):
 @torch.no_grad()
 def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_strength_mask, config):
     """
-    Applies guidance to the predicted x0, nudging it towards observations.
-    Handles different guidance strengths and stochastic masking for dense data.
+    Applies observation-based guidance to the model's prediction of the clean state (x0).
+    This is a key step in data assimilation, nudging the model towards reality.
+    It iterates through different observation sources and applies their specified operator.
+    Generates new 3D ocean states conditionally guided by multi-source observations.
     """
     guided_x_0 = x_0_pred.clone()
     B, C, D, H, W = x_0_pred.shape
@@ -39,42 +44,27 @@ def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_s
     active_sources = [s for s in config.observation_sources if s.get("enabled", False)]
 
     for source in active_sources:
-        # Get the mask for the current observation type
-        # This is a bit of a placeholder; a real implementation might need a more robust
-        # way to link source configs to the mask segments. For now, we assume the masks
-        # from different sources are mutually exclusive, which holds for our synthetic data.
-        
-        # We need to create a mask specific to this source's strength
         source_strength = source.get("guidance_strength", 1.0)
         source_mask = (observed_mask.bool()) & (guidance_strength_mask == source_strength)
 
         if not torch.any(source_mask):
             continue
 
-        # --- Handle stochastic masking for dense data ---
-        subsample_frac = source.get("subsample_fraction")
-        if subsample_frac is not None and subsample_frac < 1.0:
-            # Flatten the mask to easily subsample
-            source_mask_flat = source_mask.flatten()
-            true_indices = torch.where(source_mask_flat)[0]
-            
-            # Choose a random subset of points
-            num_to_sample = int(len(true_indices) * subsample_frac)
-            sampled_indices = true_indices[torch.randperm(len(true_indices))[:num_to_sample]]
-            
-            # Create the new subsampled mask
-            final_guidance_mask_flat = torch.zeros_like(source_mask_flat)
-            final_guidance_mask_flat[sampled_indices] = True
-            source_mask = final_guidance_mask_flat.reshape(source_mask.shape)
+        # Subsampling is handled during data creation, so we don't need to do it here.
+        # The mask passed in is already the final one.
             
         operator = source.get("operator", "point_replacement").lower()
         
+        # 'point_replacement': The simplest form of guidance. Directly nudges the model state
+        # at observation locations towards the observed value.
         if operator == "point_replacement":
             # Nudge the prediction towards the observation
             # x_guided = w * y_obs + (1 - w) * x_pred
             nudge = source_strength * (observations - x_0_pred)
             guided_x_0[source_mask] += nudge[source_mask]
 
+        # 'localized_innovation': A more sophisticated method that spreads the influence of an
+        # observation to nearby grid cells using a Gaussian kernel.
         elif operator == "localized_innovation":
             radius = source.get("localization_radius", 3)
             sigma = radius / 2.0 # A reasonable default for sigma
@@ -102,13 +92,10 @@ def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_s
             update_field = normalized_smoothed_innovation.view(B, C, D, H, W)
             guided_x_0 += source_strength * update_field
 
+        # 'latent_blending': A guidance method that operates in the model's latent space.
+        # It is handled separately within the main sampling loop, not here.
         elif operator == "latent_blending":
-            # This operator is handled inside the main sampling loop, as it needs
-            # to interact with the model's internal states. We just use this
-            # block to acknowledge the operator exists. The actual guidance happens
-            # by recalculating the predicted_noise in the main loop.
-            # The `guided_x_0` from the unguided pass is returned, and the magic
-            # happens in the next step of the `sample_conditional` function.
+            # This operator is handled inside the main sampling loop.
             pass
 
         else:
@@ -153,12 +140,14 @@ def sample_conditional(model, diffusion, config, observations, observed_mask,
     else:
         raise ValueError(f"Unknown sampling method: {sampler_name}")
 
-    for i, step in enumerate(timesteps_to_sample[:-1]):
+    for i, step in enumerate(tqdm(timesteps_to_sample[:-1], desc="Sampling Timesteps")):
         t = torch.full((num_samples,), step, device=device, dtype=torch.long)
-        
+
         # --- Step 1: Get a noise prediction. This will be guided if latent_blending is active. ---
         is_latent_blending = any(s.get("operator", "").lower() == "latent_blending" for s in config.observation_sources if s.get("enabled"))
 
+        # If latent_blending is active, the model's forward pass is modified to blend the
+        # latent representation of the current state with the latent representation of the observed state.
         if is_latent_blending:
             # --- Latent Blending Guidance ---
             # 1a. Get the original unguided prediction
@@ -201,13 +190,16 @@ def sample_conditional(model, diffusion, config, observations, observed_mask,
         # --- Step 2: Predict x0 from the (potentially guided) noise ---
         x_0_pred = diffusion.predict_x0_from_noise(x_t, t, predicted_noise, land_mask_batch)
 
-        # --- Step 3: Apply any output-space guidance methods (e.g., localized_innovation) ---
+        # --- Step 3: Apply guidance in the data space (e.g., localized_innovation) ---
+        # This function nudges the predicted clean state (x0) towards the observations.
         # This function will skip any sources that use 'latent_blending'.
         guided_x_0 = apply_observation_guidance(x_0_pred, observations_tensor, observed_mask_tensor, guidance_strength_tensor, config)
         
+        # Ensure the guided state is physically plausible and respects the land mask.
         guided_x_0 = torch.clamp(guided_x_0, 0., 1.) * land_mask_batch
 
-        # --- Sampler-specific update step ---
+        # --- Step 4: Use the guided x0 to take one step in the reverse diffusion process ---
+        # This computes the state at the next (less noisy) timestep.
         t_prev_step = timesteps_to_sample[i + 1]
         t_prev = torch.full((num_samples,), t_prev_step, device=device, dtype=torch.long)
 
