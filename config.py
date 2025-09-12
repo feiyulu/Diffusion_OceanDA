@@ -106,6 +106,7 @@ class Config:
         sampling_batch_size=4,
         sampling_steps=20,
         ddim_eta=0.0,
+        use_full_ddpm_schedule=False,
         
         # --- Observation Settings ---
         # This list defines all possible observation sources (real or synthetic) that can be
@@ -159,7 +160,8 @@ class Config:
             #     "guidance_strength": 1.0,
             #     "operator": "resampling_guidance",
             #     "resampling_steps": 50, # Number of diffusion steps for resampling
-            #     "resampling_method": "dpm-solver++" # 'ddpm' or 'dpm-solver++'
+            #     "resampling_method": "dpm-solver++", # 'ddpm' or 'dpm-solver++'
+            #     "resampling_iterations": 1 # Number of refinement iterations
             # }
 
         # --- Evaluation Settings ---
@@ -256,6 +258,7 @@ class Config:
         self.sampling_batch_size = sampling_batch_size
         self.sampling_steps = sampling_steps
         self.ddim_eta = ddim_eta
+        self.use_full_ddpm_schedule = use_full_ddpm_schedule
         
         self.observation_sources = observation_sources
 

@@ -98,57 +98,64 @@ def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_s
         # 'resampling_guidance': A powerful method that uses a short diffusion-denoising
         # loop to let the model itself spread the innovation in a physically realistic way.
         elif operator == "resampling_guidance":
+            # --- NEW: Iterative Refinement ---
             resampling_steps = source.get("resampling_steps", 50)
+            resampling_iterations = source.get("resampling_iterations", 1)
+
             if resampling_steps <= 0:
                 continue
-            
-            # 1. Create a sparse innovation field
-            innovation = (observations - x_0_pred) * source_mask
-            
-            # 2. Create the initial state for resampling by adding the sparse correction
-            x_0_hybrid = x_0_pred + source_strength * innovation
-            x_0_hybrid = torch.clamp(x_0_hybrid, 0., 1.) * land_mask_batch
 
-            # 3. Diffuse this hybrid state forward for a few steps
-            t_resample = torch.tensor([resampling_steps - 1], device=x_0_pred.device)
-            x_t_hybrid, _ = diffusion.noise_images(x_0_hybrid, t_resample, land_mask_batch)
+            current_x_0 = x_0_pred # Start with the model's initial prediction
 
-            # 4. Denoise the hybrid state back to step 0 using the chosen inner sampler
-            x_resampled = x_t_hybrid
-            resampling_method = source.get("resampling_method", "dpm-solver++").lower()
+            for i in range(resampling_iterations):
+                # 1. Create a sparse innovation field against the *current* best estimate
+                innovation = (observations - current_x_0) * source_mask
+                
+                # 2. Create the initial state for resampling by adding the sparse correction
+                x_0_hybrid = current_x_0 + source_strength * innovation
+                x_0_hybrid = torch.clamp(x_0_hybrid, 0., 1.) * land_mask_batch
 
-            if resampling_method == 'ddpm':
-                # Slower, more robust DDPM sampler
-                for i in tqdm(reversed(range(resampling_steps)), desc=f"DDPM Resampling ({source['name']})", leave=False):
-                    t = torch.full((x_0_pred.shape[0],), i, device=x_0_pred.device, dtype=torch.long)
-                    pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input)
-                    x_0_from_noise = diffusion.predict_x0_from_noise(x_resampled, t, pred_noise, land_mask_batch)
-                    x_resampled = diffusion.p_sample_from_x0(x_resampled, t, x_0_from_noise, land_mask_batch)
-            
-            elif resampling_method == 'dpm-solver++':
-                # Faster DPM-Solver++
-                dpm_solver = DPMSolver(diffusion.alphas_cumprod)
-                model_s_list = []
-                inner_timesteps = torch.linspace(resampling_steps - 1, 0, resampling_steps + 1, device=x_0_pred.device).long().tolist()
+                # 3. Diffuse this hybrid state forward for a few steps
+                t_resample = torch.tensor([resampling_steps - 1], device=x_0_pred.device)
+                x_t_hybrid, _ = diffusion.noise_images(x_0_hybrid, t_resample, land_mask_batch)
 
-                for i, step in enumerate(tqdm(inner_timesteps[:-1], desc=f"Fast Resampling ({source['name']})", leave=False)):
-                    t = torch.full((x_0_pred.shape[0],), step, device=x_0_pred.device, dtype=torch.long)
-                    t_prev_step = inner_timesteps[i + 1]
-                    pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input)
+                # 4. Denoise the hybrid state back to step 0 using the chosen inner sampler
+                x_resampled = x_t_hybrid
+                resampling_method = source.get("resampling_method", "dpm-solver++").lower()
+                desc = f"Resampling ({source['name']}) Iter {i+1}/{resampling_iterations}"
 
-                    if len(model_s_list) == 0:
-                        x_resampled = dpm_solver.dpm_solver_first_order_update(pred_noise, step, t_prev_step, x_resampled)
-                    else:
-                        x_resampled = dpm_solver.multistep_dpm_solver_second_order_update(model_s_list, pred_noise, step, t_prev_step, x_resampled)
-                    
-                    # Correctly manage the history for the next step
-                    model_s_list.append({'s': step, 'output': pred_noise})
-                    if len(model_s_list) > 1: # DPM-Solver++ 2nd order needs a history of size 1
-                        model_s_list.pop(0) # Keep the list at size 1
-            else:
-                raise ValueError(f"Unknown resampling_method: {resampling_method}")
+                if resampling_method == 'ddpm':
+                    for i in tqdm(reversed(range(resampling_steps)), desc=desc, leave=False):
+                        t = torch.full((x_0_pred.shape[0],), i, device=x_0_pred.device, dtype=torch.long)
+                        pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input)
+                        x_0_from_noise = diffusion.predict_x0_from_noise(x_resampled, t, pred_noise, land_mask_batch)
+                        x_resampled = diffusion.p_sample_from_x0(x_resampled, t, x_0_from_noise, land_mask_batch)
+                
+                elif resampling_method == 'dpm-solver++':
+                    dpm_solver = DPMSolver(diffusion.alphas_cumprod)
+                    model_s_list = []
+                    inner_timesteps = torch.linspace(resampling_steps - 1, 0, resampling_steps + 1, device=x_0_pred.device).long().tolist()
 
-            guided_x_0 = x_resampled
+                    for i, step in enumerate(tqdm(inner_timesteps[:-1], desc=desc, leave=False)):
+                        t = torch.full((x_0_pred.shape[0],), step, device=x_0_pred.device, dtype=torch.long)
+                        t_prev_step = inner_timesteps[i + 1]
+                        pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input)
+
+                        if len(model_s_list) == 0:
+                            x_resampled = dpm_solver.dpm_solver_first_order_update(pred_noise, step, t_prev_step, x_resampled)
+                        else:
+                            x_resampled = dpm_solver.multistep_dpm_solver_second_order_update(model_s_list, pred_noise, step, t_prev_step, x_resampled)
+                        
+                        model_s_list.append({'s': step, 'output': pred_noise})
+                        if len(model_s_list) > 1:
+                            model_s_list.pop(0)
+                else:
+                    raise ValueError(f"Unknown resampling_method: {resampling_method}")
+
+                # The output of this iteration becomes the input for the next
+                current_x_0 = x_resampled
+
+            guided_x_0 = current_x_0
 
         else:
             raise ValueError(f"Unknown observation operator: {operator}")
@@ -184,10 +191,17 @@ def sample_conditional(model, diffusion, config, observations, observed_mask,
     prev_state_input = prev_state_surface.repeat(num_samples, 1, 1, 1).to(device) if config.previous_states and prev_state_surface is not None else None
 
     sampler_name = config.sampling_method.lower()
-    if sampler_name in ['ddpm', 'ddim']:
-        timesteps_to_sample = list(reversed(range(0, diffusion.timesteps)))
+    sampling_steps = config.sampling_steps
+    # --- NEW: Allow overriding DDPM to use its full, slow schedule for max quality ---
+    use_full_schedule = getattr(config, 'use_full_ddpm_schedule', False) and sampler_name == 'ddpm'
+
+    if use_full_schedule:
+        print(f"Using full {diffusion.timesteps}-step schedule for DDPM sampler.")
+        timesteps_to_sample = list(reversed(range(diffusion.timesteps)))
+    elif sampler_name in ['ddpm', 'ddim']:
+        # Create a sparse set of timesteps for accelerated sampling
+        timesteps_to_sample = torch.linspace(diffusion.timesteps - 1, 0, sampling_steps + 1, device=device).long().tolist()
     elif sampler_name == 'dpm-solver++':
-        sampling_steps = config.sampling_steps
         timesteps_to_sample = torch.linspace(diffusion.timesteps - 1, 0, sampling_steps + 1, device=device).long().tolist()
         dpm_solver = DPMSolver(diffusion.alphas_cumprod)
         model_s_list = []
