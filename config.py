@@ -92,6 +92,13 @@ class Config:
         co2_range=[320,450],
         location_embedding_types=["lon_cyclical", "cos_lat", "coriolis"],
 
+        # --- NEW: Previous State Conditioning ---
+        # A list of previous states to condition the model on.
+        # Each entry specifies the time lag and which channels to use.
+        # Example: [{"lag_days": 1, "channels": [0]}, {"lag_days": 5, "channels": [0]}]
+        # This would use SST from 1 day ago and 5 days ago.
+        previous_states=[],
+
         # --- Sampling Parameters ---
         # Controls how new samples are generated from the trained model.
         sampling_method='ddpm',
@@ -103,47 +110,57 @@ class Config:
         # --- Observation Settings ---
         # This list defines all possible observation sources (real or synthetic) that can be
         # used for conditional sampling (data assimilation).
-        observation_sources=[
-            {
-                "name": "synthetic_argo",
-                "type": "synthetic_profiles",
-                "enabled": True,
-                "num_profiles": 100,
-                "guidance_strength": 0.8, # Overall strength of the correction
-                "operator": "localized_innovation", # 'point_replacement', 'localized_innovation', or 'latent_blending'
-                "localization_radius": 4 # Radius of influence in grid cells
-            },
-            {
-                "name": "real_argo",
-                "type": "real_argo",
-                "enabled": False, # Disabled by default
-                "filepath_template": "/scratch/cimes/feiyul/Ocean_Data/obs_data/argo/argo_{year}_interp25.nc",
-                "time_window_days": 1,
-                "guidance_strength": 0.8,
-                "operator": "localized_innovation",
-                "localization_radius": 4
-            },
-            {
-                "name": "real_sst",
-                "type": "real_sst",
-                "enabled": False, # Disabled by default
-                "filepath_template": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.{year}.regridded.nc",
-                "target_channel": 0,
-                "guidance_strength": 0.5,
-                "operator": "localized_innovation",
-                "localization_radius": 2
-            },
-            {
-                "name": "synthetic_sst",
-                "type": "synthetic_surface",
-                "enabled": True, # Disabled by default
-                "target_channel": 0, # e.g., Temperature
-                "guidance_strength": 0.5,
-                "operator": "localized_innovation",
-                "subsample_fraction": 0.05, # Use only 5% of SST data for guidance
-                "localization_radius": 2
-            }
-        ],
+        observation_sources=[],
+            # {
+            #     "name": "synthetic_argo",
+            #     "type": "synthetic_profiles",
+            #     "enabled": True,
+            #     "num_profiles": 100,
+            #     "guidance_strength": 0.8, # Overall strength of the correction
+            #     "operator": "localized_innovation", # 'point_replacement', 'localized_innovation', or 'latent_blending'
+            #     "localization_radius": 4 # Radius of influence in grid cells
+            # },
+            # {
+            #     "name": "real_argo",
+            #     "type": "real_argo",
+            #     "enabled": False, # Disabled by default
+            #     "filepath_template": "/scratch/cimes/feiyul/Ocean_Data/obs_data/argo/argo_{year}_interp25.nc",
+            #     "time_window_days": 1,
+            #     "guidance_strength": 0.8,
+            #     "operator": "localized_innovation",
+            #     "localization_radius": 4
+            # },
+            # {
+            #     "name": "real_sst",
+            #     "type": "real_sst",
+            #     "enabled": False, # Disabled by default
+            #     "filepath_template": "/scratch/cimes/feiyul/Ocean_Data/obs_data/sst/sst.day.{year}.regridded.nc",
+            #     "target_channel": 0,
+            #     "guidance_strength": 0.5,
+            #     "operator": "localized_innovation",
+            #     "localization_radius": 2
+            # },
+            # {
+            #     "name": "synthetic_sst",
+            #     "type": "synthetic_surface",
+            #     "enabled": True, # Disabled by default
+            #     "target_channel": 0, # e.g., Temperature
+            #     "guidance_strength": 0.5,
+            #     "operator": "localized_innovation",
+            #     "subsample_fraction": 0.05, # Use only 5% of SST data for guidance
+            #     "localization_radius": 2
+            # }
+            # ,
+            # {
+            #     "name": "resampling_argo",
+            #     "type": "synthetic_profiles",
+            #     "enabled": False, # Disabled by default
+            #     "num_profiles": 50,
+            #     "guidance_strength": 1.0,
+            #     "operator": "resampling_guidance",
+            #     "resampling_steps": 50, # Number of diffusion steps for resampling
+            #     "resampling_method": "dpm-solver++" # 'ddpm' or 'dpm-solver++'
+            # }
 
         # --- Evaluation Settings ---
         # Defines which days to run sampling on and which depth levels to plot.
@@ -226,6 +243,7 @@ class Config:
         self.co2_varname = co2_varname
         self.co2_range = co2_range
         self.location_embedding_types = location_embedding_types
+        self.previous_states = previous_states
         
         self.location_embedding_channels = 0
         if self.location_embedding_types:

@@ -82,6 +82,30 @@ if __name__ == "__main__":
             # Load the ground truth data for this day to use for observation generation and verification.
             true_sample, true_conditions = load_test_ocean_slice(config, year, sample_day)
             true_sample = true_sample.to(config.device)
+
+            # --- NEW: Load previous states' surface data ---
+            prev_state_surface = None
+            if config.previous_states:
+                print("Loading previous states for sequential input...")
+                prev_state_surfaces = []
+                for state_config in config.previous_states:
+                    lag_days = state_config.get("lag_days", 1)
+                    channels_to_use = state_config.get("channels", [0])
+                    prev_day = sample_day - lag_days
+                    if prev_day < 0:
+                        print(f"Warning: Skipping previous state for lag {lag_days} as it falls before the start of the year.")
+                        continue
+                    
+                    print(f"  - Loading state from {lag_days} day(s) ago (day {prev_day}), channels {channels_to_use}...")
+                    prev_sample, _ = load_test_ocean_slice(config, year, prev_day)
+                    # Extract surface layer (depth=0) for the specified channels
+                    surface_slice = prev_sample[:, channels_to_use, 0, :, :].to(config.device)
+                    prev_state_surfaces.append(surface_slice)
+                
+                if prev_state_surfaces:
+                    prev_state_surface = torch.cat(prev_state_surfaces, dim=1)
+                print(f"Previous state surface shape: {prev_state_surface.shape}")
+
             target_location_field = location_field
 
             clim_ds = xr.open_dataset(config.filepath_t_clim, decode_times=False)
@@ -156,6 +180,7 @@ if __name__ == "__main__":
                     guidance_strength_mask=guidance_strength.to(device),
                     land_mask=land_mask,
                     target_conditions=true_conditions, target_location_field=target_location_field,
+                    prev_state_surface=prev_state_surface,
                     num_samples=current_batch_size)
                 
                 for i in range(generated_batch.shape[0]):

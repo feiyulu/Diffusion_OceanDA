@@ -396,10 +396,16 @@ class UNet(nn.Module):
                 VerticalDecoder(latent_dim=latent_dim_for_group, out_channels=num_channels_in_group, depth_size=self.depth_size)
             )
         
+        # --- Calculate total input channels for the 2D U-Net ---
         total_latent_dim = sum(self.latent_dims)
         unet2d_in_channels = total_latent_dim + config.location_embedding_channels
+        # Add channels for previous states if configured
+        if config.previous_states:
+            num_prev_state_channels = sum(len(state_config.get("channels", [])) for state_config in config.previous_states)
+            unet2d_in_channels += num_prev_state_channels
+
         self.unet_2d = UNet2D(config, unet2d_in_channels)
-    
+
     def encode_vertical(self, x, mask, should_log=False):
         """Runs the vertical encoders."""
         latent_repr_list = []
@@ -435,7 +441,7 @@ class UNet(nn.Module):
             latent_start_idx = latent_end_idx
         return output_list
         
-    def forward(self, x, t, mask, conditions=None, location_field=None):
+    def forward(self, x, t, mask, conditions=None, location_field=None, prev_state_surface=None):
         is_main_process = not x.device.type == 'cuda' or x.device.index == 0
         should_log = ENABLE_DIAGNOSTICS and is_main_process and not UNet._has_logged_forward
 
@@ -447,17 +453,28 @@ class UNet(nn.Module):
         concatenated_latent_repr, representative_horizontal_mask = self.encode_vertical(x, mask, should_log)
         if should_log: print(f"Concatenated Latent Repr: {concatenated_latent_repr.shape}")
 
+        # --- Assemble all 2D inputs for the U-Net ---
+        unet_input_list = [concatenated_latent_repr]
+        # The mask for the latent representation from the vertical encoders
+        unet_mask_list = [representative_horizontal_mask.repeat(1, sum(self.latent_dims), 1, 1)]
+
         if self.config.location_embedding_channels > 0 and location_field is not None:
-            concatenated_latent_repr = torch.cat([concatenated_latent_repr, location_field], dim=1)
-            location_mask = torch.ones_like(location_field)
-            unet_input_mask = torch.cat([representative_horizontal_mask.repeat(1, sum(self.latent_dims), 1, 1), location_mask * representative_horizontal_mask], dim=1)
-            if should_log: print(f"After Location Concat: {concatenated_latent_repr.shape}")
-        else:
-            unet_input_mask = representative_horizontal_mask.repeat(1, sum(self.latent_dims), 1, 1)
+            unet_input_list.append(location_field)
+            location_mask = torch.ones_like(location_field) * representative_horizontal_mask
+            unet_mask_list.append(location_mask)
+
+        # Add previous state surface fields if provided
+        if self.config.previous_states and prev_state_surface is not None:
+            unet_input_list.append(prev_state_surface)
+            prev_state_mask = torch.ones_like(prev_state_surface) * representative_horizontal_mask
+            unet_mask_list.append(prev_state_mask)
+
+        final_unet_input = torch.cat(unet_input_list, dim=1)
+        unet_input_mask = torch.cat(unet_mask_list, dim=1)
+        if should_log: print(f"Final UNet2D Input Shape: {final_unet_input.shape}")
 
         time_emb = self.time_mlp(t)
-
-        unet_output = self.unet_2d(concatenated_latent_repr, time_emb, unet_input_mask)
+        unet_output = self.unet_2d(final_unet_input, time_emb, unet_input_mask)
         
         output_list = self.decode_vertical(x, unet_output, mask, should_log)
         
