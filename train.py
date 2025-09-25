@@ -30,23 +30,56 @@ class LazyOceanDataset(torch.utils.data.Dataset):
     """
     def __init__(self, config, time_coords, land_mask, location_field, area_weights): 
         self.config = config
-        self.time_coords = time_coords
+        self.original_time_coords = time_coords
         self.land_mask = land_mask
         self.location_field = location_field
         self.area_weights = area_weights
 
+        self.start_index = 0
+        if self.config.previous_states:
+            # Calculate the maximum number of steps back we need to look.
+            max_lag_days = max(state.get("lag_days", 0) for state in self.config.previous_states)
+            self.start_index = max_lag_days * self.config.training_day_interval
+            print(f"Dataset will skip the first {self.start_index} time steps to ensure history for previous states.")
+
+        # The effective dataset starts after the required history period.
+        self.time_coords = self.original_time_coords[self.start_index:]
+
     def __len__(self):
+        # The length of the dataset is the number of time coordinates we can actually use.
         return len(self.time_coords)
 
     def __getitem__(self, idx):
         time_coord = self.time_coords[idx]
-        data_slice, conditions_at_idx = load_single_ocean_slice(self.config, time_coord)
+        data_slice, conditions_at_idx = load_single_ocean_slice(self.config, time_coord, return_doy=True)
         data_slice_masked = data_slice * self.land_mask.squeeze(0)
         
-        # NEW: Return area weights along with other data
-        return (data_slice_masked, conditions_at_idx, 
-                self.location_field.squeeze(0), self.land_mask.squeeze(0), 
-                self.area_weights.squeeze(0))
+        prev_state_surface = None
+        if self.config.previous_states:
+            # Because we've adjusted the start_index, we can now safely assume
+            # that all previous states for any given 'idx' will exist.
+            prev_state_surfaces = []
+            
+            for state_config in self.config.previous_states:
+                lag_days = state_config.get("lag_days", 1)
+                channels_to_use = state_config.get("channels", [0])
+                
+                # The current 'idx' corresponds to an item in the *sliced* time_coords list.
+                # We need to find the original index to correctly calculate the lag.
+                original_idx = self.start_index + idx
+                prev_original_idx = original_idx - lag_days * self.config.training_day_interval
+                
+                prev_time_coord = self.original_time_coords[prev_original_idx]
+                prev_sample, _ = load_single_ocean_slice(self.config, prev_time_coord)
+                # Corrected indexing for a 4D tensor (C, D, H, W) to get a 3D surface slice (C_slice, H, W)
+                surface_slice = prev_sample[channels_to_use, 0, :, :]
+                prev_state_surfaces.append(surface_slice)
+
+            # Concatenate along the channel dimension (dim=0)
+            prev_state_surface = torch.cat(prev_state_surfaces, dim=0)
+
+        return (data_slice_masked, conditions_at_idx, self.location_field.squeeze(0), 
+                self.land_mask.squeeze(0), self.area_weights.squeeze(0), prev_state_surface)
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
@@ -58,7 +91,7 @@ if __name__ == "__main__":
     config_path = os.path.join(args.work_path, args.config)
     try:
         config = Config.from_json_file(config_path)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, json.JSONDecodeError) as e:
         print(e); raise
 
     accelerator = Accelerator(gradient_accumulation_steps=config.gradient_accumulation_steps)

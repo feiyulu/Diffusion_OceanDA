@@ -98,13 +98,16 @@ if __name__ == "__main__":
                     
                     print(f"  - Loading state from {lag_days} day(s) ago (day {prev_day}), channels {channels_to_use}...")
                     prev_sample, _ = load_test_ocean_slice(config, year, prev_day)
-                    # Extract surface layer (depth=0) for the specified channels
-                    surface_slice = prev_sample[:, channels_to_use, 0, :, :].to(config.device)
+                    # Extract surface layer (depth=0) for the specified channels.
+                    # load_test_ocean_slice returns a shape of (1, C, D, H, W), so we index at batch 0.
+                    surface_slice = prev_sample[0, channels_to_use, 0, :, :].to(config.device)
+                    # Add a batch dimension back for concatenation.
+                    surface_slice = surface_slice.unsqueeze(0)
                     prev_state_surfaces.append(surface_slice)
                 
                 if prev_state_surfaces:
-                    prev_state_surface = torch.cat(prev_state_surfaces, dim=1)
-                print(f"Previous state surface shape: {prev_state_surface.shape}")
+                    prev_state_surface = torch.cat(prev_state_surfaces, dim=1) # Concatenate along the channel dimension
+                    print(f"Previous state surface shape: {prev_state_surface.shape}")
 
             target_location_field = location_field
 

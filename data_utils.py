@@ -20,7 +20,7 @@ def get_time_coordinates(config):
         time_coords = ds.sel(time=slice(config.training_day_range[0], config.training_day_range[1])).time
         return time_coords[::config.training_day_interval].values
 
-def load_single_ocean_slice(config, time_coord):
+def load_single_ocean_slice(config, time_coord, return_doy=False):
     """
     Loads and processes a single time slice of ocean data.
     """
@@ -58,7 +58,7 @@ def load_single_ocean_slice(config, time_coord):
     
     conditional_data = {}
     if config.conditioning_configs:
-        if 'dayofyear' in config.conditioning_configs:
+        if 'dayofyear' in config.conditioning_configs or return_doy:
             day_of_year = time_coord.timetuple().tm_yday
             conditional_data['dayofyear'] = torch.tensor(day_of_year, dtype=torch.long)
         
