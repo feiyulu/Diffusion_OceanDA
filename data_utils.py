@@ -71,6 +71,42 @@ def load_single_ocean_slice(config, time_coord, return_doy=False):
 
     return data_tensor, conditional_data
 
+def load_2d_prior_slice(config, time_coord):
+    """
+    Loads and processes a single time slice of a 2D prior field (e.g., SSH).
+    """
+    prior_fields = []
+    for field_config in config.prior_2d_fields:
+        if not field_config.get("enabled", False):
+            continue
+        
+        name = field_config.get("name")
+        if name == "ssh":
+            filepaths = config.filepath_ssh
+            varname = config.varname_ssh
+            min_val, max_val = config.SSH_range
+        else:
+            print(f"Warning: Unknown 2D prior field '{name}'. Skipping.")
+            continue
+
+        with xr.open_mfdataset(filepaths, combine='by_coords', decode_cf=True, chunks={'time': 1}) as ds:
+            # Rename coordinates if they don't match the expected 'lat' and 'lon'.
+            if config.varname_lat and config.varname_lat in ds.coords and config.varname_lat != 'lat':
+                ds = ds.rename({config.varname_lat: 'lat'})
+            if config.varname_lon and config.varname_lon in ds.coords and config.varname_lon != 'lon':
+                ds = ds.rename({config.varname_lon: 'lon'})
+
+            da_sliced = ds[varname].sel(time=time_coord, method='nearest').isel(
+                lat=slice(config.lat_range[0], config.lat_range[1]), 
+                lon=slice(config.lon_range[0], config.lon_range[1])
+            ).load()
+        data_np = da_sliced.values.astype(np.float32)
+        # Replace NaNs (e.g., land areas) with 0 before normalization.
+        data_np[np.isnan(data_np)] = 0.0
+        normalized_data_np = (data_np - min_val) / (max_val - min_val)
+        prior_fields.append(normalized_data_np)
+    return torch.tensor(np.stack(prior_fields, axis=0), dtype=torch.float32) if prior_fields else None
+
 def load_real_observations(config, target_time_pd):
     """
     Loads and processes real-world observations for a specific day.

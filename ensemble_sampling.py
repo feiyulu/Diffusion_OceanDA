@@ -11,7 +11,7 @@ import re
 import pickle
 
 from config import Config
-from data_utils import load_static_data, load_test_ocean_slice, load_real_observations
+from data_utils import load_static_data, load_test_ocean_slice, load_real_observations, load_2d_prior_slice
 from unet_model import UNet
 from diffusion_process import Diffusion
 from sampling_utils import sample_conditional
@@ -109,6 +109,21 @@ if __name__ == "__main__":
                     prev_state_surface = torch.cat(prev_state_surfaces, dim=1) # Concatenate along the channel dimension
                     print(f"Previous state surface shape: {prev_state_surface.shape}")
 
+            # --- NEW: Load 2D prior fields ---
+            prior_2d_data = None
+            if config.prior_2d_fields:
+                print("Loading 2D prior fields...")
+                prior_2d_list = []
+                for field_config in config.prior_2d_fields:
+                    lag_days = field_config.get("lag_days", 1)
+                    prev_day = sample_day - lag_days
+                    prev_time_coord = pd.to_datetime(f"{year}-01-01") + pd.to_timedelta(prev_day, unit='d')
+                    prior_slice = load_2d_prior_slice(config, prev_time_coord)
+                    if prior_slice is not None:
+                        prior_2d_list.append(prior_slice.unsqueeze(0)) # Add batch dim
+                if prior_2d_list:
+                    prior_2d_data = torch.cat(prior_2d_list, dim=1).to(config.device)
+
             target_location_field = location_field
 
             clim_ds = xr.open_dataset(config.filepath_t_clim, decode_times=False)
@@ -184,6 +199,7 @@ if __name__ == "__main__":
                     land_mask=land_mask,
                     target_conditions=true_conditions, target_location_field=target_location_field,
                     prev_state_surface=prev_state_surface,
+                    prior_2d_fields=prior_2d_data,
                     num_samples=current_batch_size)
                 
                 for i in range(generated_batch.shape[0]):

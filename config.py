@@ -19,11 +19,13 @@ class Config:
         filepath_s=None,
         filepath_t_test=None,
         filepath_s_test=None,
+        filepath_ssh=None,
         filepath_static=None, 
         filepath_mask=None,
         filepath_z_static=None,
         varname_t='T',
         varname_s='S',
+        varname_ssh='SSH_prior',
         varname_lat='lat',
         varname_lon='lon',
         mask_varname='wet',
@@ -42,6 +44,7 @@ class Config:
         # Defines the min/max values for normalizing physical data to the [0, 1] range.
         T_range=[-2,33],
         S_range=[32,37],
+        SSH_range=[-1.5, 1.5], # In meters, should be verified
 
         # --- Core Diffusion Model Hyperparameters ---
         # Controls the noise schedule for the diffusion process.
@@ -98,6 +101,13 @@ class Config:
         # Example: [{"lag_days": 1, "channels": [0]}, {"lag_days": 5, "channels": [0]}]
         # This would use SST from 1 day ago and 5 days ago.
         previous_states=[],
+
+        # --- NEW: 2D Prior Fields ---
+        # A list of 2D prior fields (like SSH) to condition the model on.
+        # Each entry specifies the time lag.
+        # Example: [{"name": "ssh", "lag_days": 1, "enabled": True}]
+        # This would use SSH from 1 day ago.
+        prior_2d_fields=[],
 
         # --- Sampling Parameters ---
         # Controls how new samples are generated from the trained model.
@@ -183,6 +193,8 @@ class Config:
         self.filepath_s = [filepath_s.format(year=year) for year in range(training_years[0],training_years[1]+1)] if self.use_salinity and filepath_s else None
         self.filepath_t_test = [filepath_t_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)]
         self.filepath_s_test = [filepath_s_test.format(year=year) for year in range(sample_years[0],sample_years[1]+1)] if self.use_salinity and filepath_s_test else None
+        self.filepath_ssh = [filepath_ssh.format(year=year) for year in range(training_years[0],training_years[1]+1)] if filepath_ssh else None
+        self.filepath_ssh_test = [filepath_ssh.format(year=year) for year in range(sample_years[0],sample_years[1]+1)] if filepath_ssh else None
         
         self.filepath_static = filepath_static
         self.filepath_mask = filepath_mask
@@ -190,6 +202,7 @@ class Config:
         self.mask_varname = mask_varname
         self.varname_t = varname_t
         self.varname_s = varname_s
+        self.varname_ssh = varname_ssh
         self.varname_lat = varname_lat
         self.varname_lon = varname_lon
         self.filepath_t_clim = filepath_t_clim
@@ -203,6 +216,7 @@ class Config:
         self.sample_days = sample_days
         self.T_range = T_range
         self.S_range = S_range
+        self.SSH_range = SSH_range
 
         self.scratch_dir = "/scratch/cimes/feiyul/Diffusion_OceanDA"
         self.output_dir = f"{self.scratch_dir}/{self.test_id}"
@@ -246,6 +260,7 @@ class Config:
         self.co2_range = co2_range
         self.location_embedding_types = location_embedding_types
         self.previous_states = previous_states
+        self.prior_2d_fields = prior_2d_fields
         
         self.location_embedding_channels = 0
         if self.location_embedding_types:
@@ -253,6 +268,13 @@ class Config:
             for emb_type in self.location_embedding_types:
                 self.location_embedding_channels += type_counts.get(emb_type, 0)
  
+        # Add channels for 2D priors like SSH
+        self.prior_2d_channels = 0
+        if self.prior_2d_fields:
+            for field_config in self.prior_2d_fields:
+                if field_config.get("enabled", False):
+                    self.prior_2d_channels += 1
+
         self.sampling_method = sampling_method
         self.ensemble_size = ensemble_size
         self.sampling_batch_size = sampling_batch_size

@@ -404,6 +404,8 @@ class UNet(nn.Module):
             num_prev_state_channels = sum(len(state_config.get("channels", [])) for state_config in config.previous_states)
             unet2d_in_channels += num_prev_state_channels
 
+        unet2d_in_channels += config.prior_2d_channels
+
         self.unet_2d = UNet2D(config, unet2d_in_channels)
 
     def encode_vertical(self, x, mask, should_log=False):
@@ -440,8 +442,8 @@ class UNet(nn.Module):
             output_list[:, group, :, :, :] = decoded_group
             latent_start_idx = latent_end_idx
         return output_list
-        
-    def forward(self, x, t, mask, conditions=None, location_field=None, prev_state_surface=None):
+
+    def forward(self, x, t, mask, conditions=None, location_field=None, prev_state_surface=None, prior_2d_fields=None):
         is_main_process = not x.device.type == 'cuda' or x.device.index == 0
         should_log = ENABLE_DIAGNOSTICS and is_main_process and not UNet._has_logged_forward
 
@@ -451,27 +453,43 @@ class UNet(nn.Module):
             _check_tensor(x, "Wrapper Input x", should_log)
 
         concatenated_latent_repr, representative_horizontal_mask = self.encode_vertical(x, mask, should_log)
-        if should_log: print(f"Concatenated Latent Repr: {concatenated_latent_repr.shape}")
+        if should_log: print(f"  [UNet Input] Base latent representation channels: {concatenated_latent_repr.shape[1]}")
 
         # --- Assemble all 2D inputs for the U-Net ---
         unet_input_list = [concatenated_latent_repr]
         # The mask for the latent representation from the vertical encoders
         unet_mask_list = [representative_horizontal_mask.repeat(1, sum(self.latent_dims), 1, 1)]
+        current_channels = concatenated_latent_repr.shape[1]
 
         if self.config.location_embedding_channels > 0 and location_field is not None:
             unet_input_list.append(location_field)
             location_mask = torch.ones_like(location_field) * representative_horizontal_mask
             unet_mask_list.append(location_mask)
+            if should_log:
+                current_channels += location_field.shape[1]
+                print(f"  [UNet Input] Added {location_field.shape[1]} location embedding channels. Total channels: {current_channels}")
 
         # Add previous state surface fields if provided
         if self.config.previous_states and prev_state_surface is not None:
             unet_input_list.append(prev_state_surface)
             prev_state_mask = torch.ones_like(prev_state_surface) * representative_horizontal_mask
             unet_mask_list.append(prev_state_mask)
+            if should_log:
+                current_channels += prev_state_surface.shape[1]
+                print(f"  [UNet Input] Added {prev_state_surface.shape[1]} previous state channels (e.g., SST). Total channels: {current_channels}")
+
+        # Add 2D prior fields like SSH if provided
+        if self.config.prior_2d_fields and prior_2d_fields is not None:
+            unet_input_list.append(prior_2d_fields)
+            prior_2d_mask = torch.ones_like(prior_2d_fields) * representative_horizontal_mask
+            unet_mask_list.append(prior_2d_mask)
+            if should_log:
+                current_channels += prior_2d_fields.shape[1]
+                print(f"  [UNet Input] Added {prior_2d_fields.shape[1]} 2D prior channels (e.g., SSH). Total channels: {current_channels}")
 
         final_unet_input = torch.cat(unet_input_list, dim=1)
         unet_input_mask = torch.cat(unet_mask_list, dim=1)
-        if should_log: print(f"Final UNet2D Input Shape: {final_unet_input.shape}")
+        if should_log: print(f"  [UNet Input] Final 2D U-Net input shape: {final_unet_input.shape}")
 
         time_emb = self.time_mlp(t)
         unet_output = self.unet_2d(final_unet_input, time_emb, unet_input_mask)

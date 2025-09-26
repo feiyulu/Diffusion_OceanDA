@@ -15,6 +15,7 @@ data_dir = '/scratch/cimes/feiyul/Ocean_Data'
 SPEAR_exp ='M9'
 T_varname = 'thetao_prior_z'  # 3D potential temperature
 S_varname = 'so_prior_z'      # 3D practical salinity
+SSH_varname = 'SSH_prior'     # 2D Sea Surface Height
 SST_obs_varname = 'sst'       # Sea Surface Temperature (observation)
 SSS_obs_varname = 'sss'       # Sea Surface Salinity (observation)
 
@@ -55,31 +56,61 @@ combine_levels = range(0, len(model_dz) + 1, 3)
 model_dz_coarse, model_z_coarse = data_types.depth_vertical_coarsen(model_dz, combine_levels)
 print(f"Original vertical levels: {len(model_dz)}. Coarsened vertical levels: {len(model_dz_coarse)}.")
 
-# --- Main Processing Loop ---
+# --- Main Processing Loop for 3D Variables ---
 # Loop through the specified year(s) to process the data.
-for year in range(2003, 2024):
-    print(f"\nProcessing data for year: {year}...")
+variables_to_process = {
+    # 'S': S_varname
+}
 
-    # Load the 3D temperature data for the entire year.
-    # Using open_mfdataset is good practice for handling multiple files per year if needed.
-    print(f"Loading raw 3D temperature data...")
-    T_ds = xr.open_mfdataset(f'{data_dir}/model_data/{SPEAR_exp}/ocean_daily.{year}0101-{year}1231.{T_varname}.nc')
-    
-    # Apply the same longitude conversion and roll as the static grid file to ensure alignment.
-    T_ds['xh'] = T_ds['xh'].where(T_ds['xh'] > 0, T_ds['xh'] + 360)
-    T_ds_rolled = T_ds.roll(xh=60, roll_coords=True)
-    T_var = T_ds_rolled[T_varname]
+for year in range(2003, 2012):
+    for var_symbol, var_name in variables_to_process.items():
+        print(f"\n--- Processing {var_symbol} for year: {year} ---")
 
-    # Perform the vertical coarsening using the dedicated function.
-    # This function calculates a weighted average of the fine layers to create the coarse layers.
-    print("Applying vertical coarsening...")
-    T_var_coarse = data_types.variable_vertical_coarsen(T_var, model_dz, combine_levels, depth_ocean)
+        # Load the 3D data for the entire year.
+        print(f"Loading raw 3D {var_symbol} data ({var_name})...")
+        try:
+            ds = xr.open_mfdataset(f'{data_dir}/model_data/{SPEAR_exp}/ocean_daily.{year}0101-{year}1231.{var_name}.nc')
+        except FileNotFoundError:
+            print(f"Warning: Data file for {var_name} in year {year} not found. Skipping.")
+            continue
+        
+        # Apply the same longitude conversion and roll as the static grid file to ensure alignment.
+        ds['xh'] = ds['xh'].where(ds['xh'] > 0, ds['xh'] + 360)
+        ds_rolled = ds.roll(xh=60, roll_coords=True)
+        data_var = ds_rolled[var_name]
 
-    # Create a new xarray Dataset with the coarsened variable.
-    T_ds_coarse = xr.Dataset({'T': T_var_coarse.astype('float32')})
+        print(f"Applying vertical coarsening to {var_symbol}...")
+        var_coarse = data_types.variable_vertical_coarsen(data_var, model_dz, combine_levels, depth_ocean)
+        ds_coarse = xr.Dataset({var_symbol: var_coarse.astype('float32')})
+        output_path = f'{data_dir}/model_data/{SPEAR_exp}/{var_symbol}.{year}.nc'
+        print(f"Saving coarsened data to {output_path}...")
+        ds_coarse.to_netcdf(output_path, unlimited_dims=["time"])
+        print(f"Processing complete for {var_symbol} in {year}.")
 
-    # Save the processed, coarsened data to a new NetCDF file.
-    output_path = f'{data_dir}/model_data/{SPEAR_exp}/T.{year}.nc'
-    print(f"Saving coarsened data to {output_path}...")
-    T_ds_coarse.to_netcdf(output_path, unlimited_dims=["time"])
-    print("Processing complete for the year.")
+# --- Main Processing Loop for 2D Variables ---
+# This loop handles variables that only need horizontal rolling, not vertical coarsening.
+variables_2d_to_process = {
+    'SSH': SSH_varname
+}
+
+for year in range(2003, 2025):
+    for var_symbol, var_name in variables_2d_to_process.items():
+        print(f"\n--- Processing 2D variable {var_symbol} for year: {year} ---")
+
+        # Load the 2D data for the entire year.
+        print(f"Loading raw 2D {var_symbol} data ({var_name})...")
+        try:
+            ds = xr.open_dataset(f'{data_dir}/model_data/{SPEAR_exp}/ocean_daily.{year}0101-{year}1231.{var_name}.nc')
+        except FileNotFoundError:
+            print(f"Warning: Data file for {var_name} in year {year} not found. Skipping.")
+            continue
+
+        # Apply the same longitude conversion and roll as the static grid file.
+        ds['xh'] = ds['xh'].where(ds['xh'] > 0, ds['xh'] + 360)
+        ds_rolled = ds.roll(xh=60, roll_coords=True)
+        
+        output_path = f'{data_dir}/model_data/{SPEAR_exp}/{var_symbol}.{year}.nc'
+        print(f"Saving rolled data to {output_path}...")
+        # Save the entire rolled dataset, which now contains the correctly rolled variable.
+        ds_rolled.to_netcdf(output_path, unlimited_dims=["time"])
+        print(f"Processing complete for {var_symbol} in {year}.")

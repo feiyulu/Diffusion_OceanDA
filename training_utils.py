@@ -56,15 +56,17 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Training)", disable=not accelerator.is_main_process)
         
         for batch_idx, batch in enumerate(pbar):
-            x_0, conditions_batch, location_field_batch, land_mask_batch, area_weights_batch, prev_state_batch = batch
+            x_0, conditions_batch, location_field_batch, land_mask_batch, area_weights_batch, prev_state_batch, prior_2d_batch = batch
             with accelerator.accumulate(model):
                 t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=accelerator.device).long()
                 x_t, true_epsilon = diffusion.noise_images(x_0, t, land_mask_batch)
                 conditions_input = {k: v for k, v in conditions_batch.items()}
                 loc_field_input = location_field_batch
+                prior_2d_input = prior_2d_batch
 
                 predicted_epsilon = model(x_t, t, land_mask_batch,
                                           prev_state_surface=prev_state_batch,
+                                          prior_2d_fields=prior_2d_input,
                                           conditions=conditions_input, 
                                           location_field=loc_field_input)
 
@@ -95,14 +97,16 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
         with torch.no_grad():
             val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.epochs} (Validation)", disable=not accelerator.is_main_process)
             for batch_val in val_pbar:
-                x_0_val, conditions_batch_val, location_field_batch_val, land_mask_batch_val, area_weights_batch_val, prev_state_batch_val = batch_val
+                x_0_val, conditions_batch_val, location_field_batch_val, land_mask_batch_val, area_weights_batch_val, prev_state_batch_val, prior_2d_batch_val = batch_val
                 t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=accelerator.device).long()
                 
                 x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, land_mask_batch_val)
                 conditions_input_val = {k: v for k, v in conditions_batch_val.items()}
                 loc_field_input_val = location_field_batch_val
+                prior_2d_input_val = prior_2d_batch_val
 
                 predicted_epsilon_val = model(x_t_val, t_val, land_mask_batch_val,
+                                              prior_2d_fields=prior_2d_input_val,
                                               prev_state_surface=prev_state_batch_val,
                                               conditions=conditions_input_val, 
                                               location_field=loc_field_input_val)

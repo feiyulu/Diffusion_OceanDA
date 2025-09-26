@@ -17,7 +17,7 @@ if not hasattr(collections, 'Container'):
     collections.Container = collections.abc.Container
 
 from config import Config 
-from data_utils import get_time_coordinates, load_single_ocean_slice, load_static_data
+from data_utils import get_time_coordinates, load_single_ocean_slice, load_static_data, load_2d_prior_slice
 from unet_model import UNet, count_parameters 
 from diffusion_process import Diffusion 
 from training_utils import train_diffusion_model, create_training_animation
@@ -39,10 +39,14 @@ class LazyOceanDataset(torch.utils.data.Dataset):
         if self.config.previous_states:
             # Calculate the maximum number of steps back we need to look.
             max_lag_days = max(state.get("lag_days", 0) for state in self.config.previous_states)
-            self.start_index = max_lag_days * self.config.training_day_interval
-            print(f"Dataset will skip the first {self.start_index} time steps to ensure history for previous states.")
+            self.start_index = max(self.start_index, max_lag_days * self.config.training_day_interval)
+        
+        if self.config.prior_2d_fields:
+            max_lag_days = max(field.get("lag_days", 0) for field in self.config.prior_2d_fields)
+            self.start_index = max(self.start_index, max_lag_days * self.config.training_day_interval)
 
-        # The effective dataset starts after the required history period.
+        if self.start_index > 0:
+            print(f"Dataset will skip the first {self.start_index} time steps to ensure history for all prior states.")
         self.time_coords = self.original_time_coords[self.start_index:]
 
     def __len__(self):
@@ -54,32 +58,46 @@ class LazyOceanDataset(torch.utils.data.Dataset):
         data_slice, conditions_at_idx = load_single_ocean_slice(self.config, time_coord, return_doy=True)
         data_slice_masked = data_slice * self.land_mask.squeeze(0)
         
-        prev_state_surface = None
+        original_idx = self.start_index + idx
+
+        # Initialize all conditional inputs to None
+        prev_state_surface, prior_2d_data = None, None
+
         if self.config.previous_states:
-            # Because we've adjusted the start_index, we can now safely assume
-            # that all previous states for any given 'idx' will exist.
             prev_state_surfaces = []
-            
             for state_config in self.config.previous_states:
-                lag_days = state_config.get("lag_days", 1)
+                lag_days = state_config.get("lag_days", 0)
                 channels_to_use = state_config.get("channels", [0])
-                
-                # The current 'idx' corresponds to an item in the *sliced* time_coords list.
-                # We need to find the original index to correctly calculate the lag.
-                original_idx = self.start_index + idx
                 prev_original_idx = original_idx - lag_days * self.config.training_day_interval
-                
                 prev_time_coord = self.original_time_coords[prev_original_idx]
                 prev_sample, _ = load_single_ocean_slice(self.config, prev_time_coord)
-                # Corrected indexing for a 4D tensor (C, D, H, W) to get a 3D surface slice (C_slice, H, W)
                 surface_slice = prev_sample[channels_to_use, 0, :, :]
                 prev_state_surfaces.append(surface_slice)
-
-            # Concatenate along the channel dimension (dim=0)
             prev_state_surface = torch.cat(prev_state_surfaces, dim=0)
 
+        if self.config.prior_2d_fields:
+            prior_2d_fields_list = []
+            for field_config in self.config.prior_2d_fields:
+                if not field_config.get("enabled", False):
+                    continue
+                lag_days = field_config.get("lag_days", 0)
+                prev_original_idx = original_idx - lag_days * self.config.training_day_interval
+                prev_time_coord = self.original_time_coords[prev_original_idx]
+                # This will load all enabled 2D priors for that time coord
+                prior_2d_slice = load_2d_prior_slice(self.config, prev_time_coord)
+                if prior_2d_slice is not None:
+                    prior_2d_fields_list.append(prior_2d_slice)
+            if prior_2d_fields_list:
+                prior_2d_data = torch.cat(prior_2d_fields_list, dim=0)
+
+        # Ensure conditional inputs are valid tensors, not None, for the dataloader
+        if prev_state_surface is None:
+            prev_state_surface = torch.empty(0, self.config.data_shape[1], self.config.data_shape[2])
+        if prior_2d_data is None:
+            prior_2d_data = torch.empty(0, self.config.data_shape[1], self.config.data_shape[2])
+
         return (data_slice_masked, conditions_at_idx, self.location_field.squeeze(0), 
-                self.land_mask.squeeze(0), self.area_weights.squeeze(0), prev_state_surface)
+                self.land_mask.squeeze(0), self.area_weights.squeeze(0), prev_state_surface, prior_2d_data)
 
 # --- Main Execution Block ---
 if __name__ == "__main__":

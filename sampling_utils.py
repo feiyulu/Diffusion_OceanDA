@@ -30,7 +30,7 @@ def _create_gaussian_kernel(radius, sigma, device):
     return gaussian_kernel.view(1, 1, kernel_size, kernel_size)
 
 @torch.no_grad()
-def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_strength_mask, land_mask_batch, config, operators_to_apply, model, diffusion, conditions_input, loc_field_input, prev_state_input):
+def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_strength_mask, land_mask_batch, config, operators_to_apply, model, diffusion, conditions_input, loc_field_input, prev_state_input, prior_2d_input):
     """
     Applies observation-based guidance to the model's prediction of the clean state (x0).
     This is a key step in data assimilation, nudging the model towards reality.
@@ -127,7 +127,7 @@ def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_s
                 if resampling_method == 'ddpm':
                     for i in tqdm(reversed(range(resampling_steps)), desc=desc, leave=False):
                         t = torch.full((x_0_pred.shape[0],), i, device=x_0_pred.device, dtype=torch.long)
-                        pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input)
+                        pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input, prior_2d_fields=prior_2d_input)
                         x_0_from_noise = diffusion.predict_x0_from_noise(x_resampled, t, pred_noise, land_mask_batch)
                         x_resampled = diffusion.p_sample_from_x0(x_resampled, t, x_0_from_noise, land_mask_batch)
                 
@@ -139,7 +139,7 @@ def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_s
                     for i, step in enumerate(tqdm(inner_timesteps[:-1], desc=desc, leave=False)):
                         t = torch.full((x_0_pred.shape[0],), step, device=x_0_pred.device, dtype=torch.long)
                         t_prev_step = inner_timesteps[i + 1]
-                        pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input)
+                        pred_noise = model(x_resampled, t, land_mask_batch, conditions=conditions_input, location_field=loc_field_input, prev_state_surface=prev_state_input, prior_2d_fields=prior_2d_input)
 
                         if len(model_s_list) == 0:
                             x_resampled = dpm_solver.dpm_solver_first_order_update(pred_noise, step, t_prev_step, x_resampled)
@@ -167,7 +167,7 @@ def apply_observation_guidance(x_0_pred, observations, observed_mask, guidance_s
 def sample_conditional(model, diffusion, config, observations, observed_mask, 
                        guidance_strength_mask, land_mask, 
                        target_conditions, target_location_field,
-                       prev_state_surface=None, num_samples=None):
+                       prev_state_surface=None, prior_2d_fields=None, num_samples=None):
     """
     Generates new 3D ocean states conditionally guided by multi-source observations.
     """
@@ -189,6 +189,7 @@ def sample_conditional(model, diffusion, config, observations, observed_mask,
     conditions_input = {key: torch.full((num_samples,), val.item(), device=device) for key, val in target_conditions.items()} if target_conditions else None
     loc_field_input = target_location_field.repeat(num_samples, 1, 1, 1).to(device) if config.location_embedding_channels > 0 and target_location_field is not None else None
     prev_state_input = prev_state_surface.repeat(num_samples, 1, 1, 1).to(device) if config.previous_states and prev_state_surface is not None else None
+    prior_2d_input = prior_2d_fields.repeat(num_samples, 1, 1, 1).to(device) if config.prior_2d_fields and prior_2d_fields is not None else None
 
     sampler_name = config.sampling_method.lower()
     sampling_steps = config.sampling_steps
@@ -213,7 +214,8 @@ def sample_conditional(model, diffusion, config, observations, observed_mask,
 
         # --- Step 1: Get a noise prediction from the model ---
         predicted_noise = model(x_t, t, land_mask_batch, conditions=conditions_input, 
-                                location_field=loc_field_input, prev_state_surface=prev_state_input)
+                                location_field=loc_field_input, prev_state_surface=prev_state_input,
+                                prior_2d_fields=prior_2d_input)
 
         # --- Step 2: Predict x0 from the (potentially guided) noise ---
         x_0_pred = diffusion.predict_x0_from_noise(x_t, t, predicted_noise, land_mask_batch)
@@ -222,7 +224,7 @@ def sample_conditional(model, diffusion, config, observations, observed_mask,
         # This function nudges the predicted clean state (x0) towards the observations.
         # We apply all data-space operators here. Latent blending is handled separately above.
         data_space_ops = ["point_replacement", "localized_innovation", "resampling_guidance"]
-        guided_x_0 = apply_observation_guidance(x_0_pred, observations_tensor, observed_mask_tensor, guidance_strength_tensor, land_mask_batch, config, operators_to_apply=data_space_ops, model=model, diffusion=diffusion, conditions_input=conditions_input, loc_field_input=loc_field_input, prev_state_input=prev_state_input)
+        guided_x_0 = apply_observation_guidance(x_0_pred, observations_tensor, observed_mask_tensor, guidance_strength_tensor, land_mask_batch, config, operators_to_apply=data_space_ops, model=model, diffusion=diffusion, conditions_input=conditions_input, loc_field_input=loc_field_input, prev_state_input=prev_state_input, prior_2d_input=prior_2d_input)
         
         # Ensure the guided state is physically plausible and respects the land mask.
         guided_x_0 = torch.clamp(guided_x_0, 0., 1.) * land_mask_batch
