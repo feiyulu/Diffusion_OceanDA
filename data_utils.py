@@ -207,16 +207,29 @@ def load_real_observations(config, target_time_pd):
                         
                         # Temperature
                         T_profile = profile['T'].values
-                        valid_T = ~np.isnan(T_profile)
-                        if np.any(valid_T):
-                            norm_T = (T_profile[valid_T] - config.T_range[0]) / (config.T_range[1] - config.T_range[0])
-                            depth_indices = np.arange(len(T_profile))[valid_T]
+                        valid_depths_T = ~np.isnan(T_profile)
+                        if np.any(valid_depths_T):
+                            norm_T = (T_profile[valid_depths_T] - config.T_range[0]) / (config.T_range[1] - config.T_range[0])
+                            depth_indices = np.arange(len(T_profile))[valid_depths_T]
                             
                             safe_mask = depth_indices < D
                             if np.any(safe_mask):
                                 observations[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = torch.from_numpy(norm_T[safe_mask]).to(device)
                                 observed_mask[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = True
                                 guidance_strength_mask[0, 0, depth_indices[safe_mask], lat_idx, lon_idx] = guidance_strength
+                        
+                        # Salinity (if enabled)
+                        if config.use_salinity:
+                            S_profile = profile['S'].values
+                            valid_depths_S = ~np.isnan(S_profile)
+                            if np.any(valid_depths_S):
+                                norm_S = (S_profile[valid_depths_S] - config.S_range[0]) / (config.S_range[1] - config.S_range[0])
+                                depth_indices = np.arange(len(S_profile))[valid_depths_S]
+                                safe_mask = depth_indices < D
+                                if np.any(safe_mask):
+                                    observations[0, 1, depth_indices[safe_mask], lat_idx, lon_idx] = torch.from_numpy(norm_S[safe_mask]).to(device)
+                                    observed_mask[0, 1, depth_indices[safe_mask], lat_idx, lon_idx] = True
+                                    guidance_strength_mask[0, 1, depth_indices[safe_mask], lat_idx, lon_idx] = guidance_strength
             except Exception as e:
                 print(f"    ...could not process Argo source {source['name']}. Error: {e}")
 

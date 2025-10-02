@@ -59,7 +59,7 @@ print(f"Original vertical levels: {len(model_dz)}. Coarsened vertical levels: {l
 # --- Main Processing Loop for 3D Variables ---
 # Loop through the specified year(s) to process the data.
 variables_to_process = {
-    # 'S': S_varname
+    'S': S_varname
 }
 
 for year in range(2003, 2012):

@@ -126,14 +126,34 @@ if __name__ == "__main__":
 
             target_location_field = location_field
 
-            clim_ds = xr.open_dataset(config.filepath_t_clim, decode_times=False)
-            if not ( config.varname_lat=='lat' and config.varname_lon=='lon'):
-                clim_ds = clim_ds.rename({config.varname_lat:'lat', config.varname_lon:'lon'})
-            clim_da = clim_ds[config.varname_t].isel(
-                lat=slice(config.lat_range[0], config.lat_range[1]), 
-                lon=slice(config.lon_range[0], config.lon_range[1]))
-            clim_pred = (clim_da - config.T_range[0]) / (config.T_range[1]-config.T_range[0])
+            # --- Load Climatology Data ---
+            print("Loading climatology data for comparison...")
+            clim_preds_list = []
 
+            # Load Temperature Climatology
+            with xr.open_dataset(config.filepath_t_clim, decode_times=False) as clim_ds_t:
+                if not (config.varname_lat == 'lat' and config.varname_lon == 'lon'):
+                    clim_ds_t = clim_ds_t.rename({config.varname_lat: 'lat', config.varname_lon: 'lon'})
+                clim_da_t = clim_ds_t[config.varname_t].isel(
+                    lat=slice(config.lat_range[0], config.lat_range[1]),
+                    lon=slice(config.lon_range[0], config.lon_range[1])
+                )
+                clim_pred_t = (clim_da_t - config.T_range[0]) / (config.T_range[1] - config.T_range[0])
+                clim_preds_list.append(clim_pred_t.values)
+
+            # Load Salinity Climatology if enabled
+            if config.use_salinity:
+                with xr.open_dataset(config.filepath_s_clim, decode_times=False) as clim_ds_s:
+                    if not (config.varname_lat == 'lat' and config.varname_lon == 'lon'):
+                        clim_ds_s = clim_ds_s.rename({config.varname_lat: 'lat', config.varname_lon: 'lon'})
+                    clim_da_s = clim_ds_s[config.varname_s].isel(
+                        lat=slice(config.lat_range[0], config.lat_range[1]),
+                        lon=slice(config.lon_range[0], config.lon_range[1])
+                    )
+                    clim_pred_s = (clim_da_s - config.S_range[0]) / (config.S_range[1] - config.S_range[0])
+                    clim_preds_list.append(clim_pred_s.values)
+
+            clim_pred = np.stack(clim_preds_list, axis=0)
 
             # --- 4. Observation Handling ---
             # Based on the config, load real observations or generate synthetic ones.

@@ -60,17 +60,23 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
             with accelerator.accumulate(model):
                 t = torch.randint(0, diffusion.timesteps, (x_0.shape[0],), device=accelerator.device).long()
                 x_t, true_epsilon = diffusion.noise_images(x_0, t, land_mask_batch)
+
+                # Ensure mask has the same number of channels as the input data.
+                # The mask is loaded with 1 channel, but the model needs it to match the data channels (e.g., T and S).
+                num_data_channels = x_0.shape[1]
+                expanded_mask = land_mask_batch.repeat(1, num_data_channels, 1, 1, 1)
+
                 conditions_input = {k: v for k, v in conditions_batch.items()}
                 loc_field_input = location_field_batch
                 prior_2d_input = prior_2d_batch
 
-                predicted_epsilon = model(x_t, t, land_mask_batch,
+                predicted_epsilon = model(x_t, t, expanded_mask,
                                           prev_state_surface=prev_state_batch,
                                           prior_2d_fields=prior_2d_input,
                                           conditions=conditions_input, 
                                           location_field=loc_field_input)
 
-                loss = weighted_mse_loss(predicted_epsilon, true_epsilon, area_weights_batch, land_mask_batch)
+                loss = weighted_mse_loss(predicted_epsilon, true_epsilon, area_weights_batch, expanded_mask)
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
@@ -101,17 +107,22 @@ def train_diffusion_model(accelerator, model, train_loader, val_loader, diffusio
                 t_val = torch.randint(0, diffusion.timesteps, (x_0_val.shape[0],), device=accelerator.device).long()
                 
                 x_t_val, true_epsilon_val = diffusion.noise_images(x_0_val, t_val, land_mask_batch_val)
+
+                # Also expand the mask for the validation loop.
+                num_data_channels_val = x_0_val.shape[1]
+                expanded_mask_val = land_mask_batch_val.repeat(1, num_data_channels_val, 1, 1, 1)
+
                 conditions_input_val = {k: v for k, v in conditions_batch_val.items()}
                 loc_field_input_val = location_field_batch_val
                 prior_2d_input_val = prior_2d_batch_val
 
-                predicted_epsilon_val = model(x_t_val, t_val, land_mask_batch_val,
+                predicted_epsilon_val = model(x_t_val, t_val, expanded_mask_val,
                                               prior_2d_fields=prior_2d_input_val,
                                               prev_state_surface=prev_state_batch_val,
                                               conditions=conditions_input_val, 
                                               location_field=loc_field_input_val)
                 
-                val_loss = weighted_mse_loss(predicted_epsilon_val, true_epsilon_val, area_weights_batch_val, land_mask_batch_val)
+                val_loss = weighted_mse_loss(predicted_epsilon_val, true_epsilon_val, area_weights_batch_val, expanded_mask_val)
                 
                 total_val_loss += accelerator.gather(val_loss).mean().item()
                 if accelerator.is_main_process:

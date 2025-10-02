@@ -30,6 +30,7 @@ class Config:
         varname_lon='lon',
         mask_varname='wet',
         filepath_t_clim=None,
+        filepath_s_clim=None,
         area_weight_varname='area_t',
 
         # --- Data Slicing and Subsetting ---
@@ -207,6 +208,7 @@ class Config:
         self.varname_lon = varname_lon
         self.filepath_t_clim = filepath_t_clim
         self.area_weight_varname = area_weight_varname
+        self.filepath_s_clim = filepath_s_clim
         
         self.depth_range = depth_range
         self.lat_range = lat_range

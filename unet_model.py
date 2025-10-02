@@ -102,7 +102,7 @@ class VerticalEncoder(nn.Module):
     def forward(self, x, mask):
         n, c, d, h, w = x.shape
         x_reshaped = rearrange(x, 'n c d h w -> (n h w) c d')
-        mask_reshaped = rearrange(mask, 'n c d h w -> (n h w) c d')[:, :1, :]
+        mask_reshaped = torch.all(rearrange(mask, 'n c d h w -> (n h w) c d'), dim=1, keepdim=True).float()
         
         x_conv, mask_conv = self.conv_in(x_reshaped, mask_reshaped) # PartialConv1d
         x_act = self.act(x_conv)
@@ -135,7 +135,7 @@ class VerticalDecoder(nn.Module):
         x_fc = self.fc(x_reshaped)
         x_unflat = rearrange(x_fc, 'b (ld d) -> b ld d', d=self.depth_size, ld=self.latent_dim)
         x_act = self.act(x_unflat)
-        mask_reshaped_1d = rearrange(original_mask_3d_group, 'n c d h w -> (n h w) c d')[:, :1, :]
+        mask_reshaped_1d = torch.any(rearrange(original_mask_3d_group, 'n c d h w -> (n h w) c d'), dim=1, keepdim=True).float()
         x_decoded, mask_decoded_1d = self.conv_out(x_act, mask_reshaped_1d) # PartialConv1d
         
         output = rearrange(x_decoded, '(n h w) c d -> n c d h w', n=n, h=h, w=w)

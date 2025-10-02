@@ -93,7 +93,7 @@ def plot_ensemble_results_3d(
         vstd=0.1*np.exp(-depth/2000)
 
         var_name = "Temperature" if c == 0 else "Salinity"
-        cmap = 'viridis' if c == 0 else 'plasma'
+        cmap = 'viridis' if c == 0 else 'cividis'
         error_cmap = 'bwr'
 
         masked_true = np.ma.masked_where(land_mask_np == 0, true_sample_level[c])
